@@ -1,0 +1,38 @@
+# Cloud Build pipeline: push to main → build Docker image → deploy to Cloud Run.
+# Triggered by the `fact-check-deploy-main` build trigger connected to the
+# GitHub repo harshbirajdar/ig-fact-checker.
+
+steps:
+  # 1. Build the container image from backend/Dockerfile, tagged with the commit SHA.
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fact-check:$SHORT_SHA
+      - -f
+      - backend/Dockerfile
+      - backend
+
+  # 2. Push the image to Artifact Registry.
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fact-check:$SHORT_SHA
+
+  # 3. Deploy the image to Cloud Run. Env vars stay as-is; --image just swaps the code.
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - fact-check
+      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fact-check:$SHORT_SHA
+      - --region=us-central1
+      - --allow-unauthenticated
+      - --quiet
+
+images:
+  - us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/fact-check:$SHORT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
