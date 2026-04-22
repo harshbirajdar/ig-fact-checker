@@ -121,5 +121,6 @@ Takes ~2–3 min. Env vars already set on Cloud Run; `--source .` doesn't touch 
 git add .
 git commit -m "describe the change"
 git push
-# then deploy (above) if backend code changed
 ```
+
+Pushes to `main` auto-deploy to Cloud Run via the `fact-check-deploy-main` Cloud Build trigger (config: [cloudbuild.yaml](cloudbuild.yaml)). Manual deploy (above) is only needed if CI/CD is down.
