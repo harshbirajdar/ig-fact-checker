@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Fact Check — Design Canvas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #0b0b0d; }
+  * { box-sizing: border-box; }
+  @keyframes dirC_spin { to { transform: rotate(360deg); } }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="screens.jsx"></script>
+<script type="text/babel" src="direction-a.jsx"></script>
+<script type="text/babel" src="direction-b.jsx"></script>
+<script type="text/babel" src="direction-c.jsx"></script>
+<script type="text/babel">
+const { useState } = React;
+
+// Phone frame wrapper — scales iPhone (402x874) into the given artboard size
+function Phone({ dark, children }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%' }}>
+      <IOSDevice width={402} height={874} dark={dark}>
+        <div style={{ width: '100%', height: '100%' }}>{children}</div>
+      </IOSDevice>
+    </div>
+  );
+}
+
+const DIRECTION_NOTES = {
+  A: 'Clinical Lab — IBM Plex Mono micro-labels, Instrument Serif claim, dotted segmented confidence gauge. Feels like a scientific instrument readout.',
+  B: 'Editorial Authority — Instrument Serif at big sizes, all-caps Inter labels, rules, drop caps. Feels like a newspaper correction desk.',
+  C: 'Calm System — SF-style system type, soft rounded cards, circular confidence ring, iOS system color palette. Feels native to iOS.',
+};
+
+function buildSections() {
+  const states = [
+    { key: 'false', label: 'Verdict · FALSE' },
+    { key: 'mostly_false', label: 'Verdict · MOSTLY FALSE' },
+    { key: 'mostly_accurate', label: 'Verdict · MOSTLY ACCURATE' },
+    { key: 'accurate', label: 'Verdict · ACCURATE' },
+    { key: 'unverified', label: "Verdict · CAN'T VERIFY" },
+  ];
+
+  const directionSection = (dirKey, label, Procs, Verdicts, Errs) => ({
+    id: `dir-${dirKey.toLowerCase()}`,
+    title: `Direction ${dirKey} — ${label}`,
+    artboards: [
+      ...['light', 'dark'].flatMap(theme => [
+        {
+          id: `${dirKey}-${theme}-processing`,
+          label: `Processing · ${theme}`,
+          width: 460, height: 930,
+          el: <Phone dark={theme === 'dark'}><Procs theme={theme} activeStep={2} /></Phone>,
+        },
+        ...states.map(s => ({
+          id: `${dirKey}-${theme}-${s.key}`,
+          label: `${s.label} · ${theme}`,
+          width: 460, height: 930,
+          el: <Phone dark={theme === 'dark'}><Verdicts theme={theme} state={s.key} /></Phone>,
+        })),
+        {
+          id: `${dirKey}-${theme}-error`,
+          label: `Error · ${theme}`,
+          width: 460, height: 930,
+          el: <Phone dark={theme === 'dark'}><Errs theme={theme} /></Phone>,
+        },
+      ]),
+    ],
+  });
+
+  return [
+    {
+      id: 'intro',
+      title: 'Fact Check — Three aesthetic directions for the verdict card',
+      artboards: [{
+        id: 'intro-card',
+        label: 'Brief',
+        width: 720, height: 420,
+        el: (
+          <div style={{
+            width: '100%', height: '100%', background: '#faf9f6', color: '#111',
+            padding: 36, fontFamily: 'Inter, system-ui, sans-serif',
+            display: 'flex', flexDirection: 'column', gap: 18,
+          }}>
+            <div style={{ fontFamily: '"Instrument Serif", Georgia, serif', fontSize: 44, lineHeight: 1.0, letterSpacing: -0.8 }}>
+              Fact Check <span style={{ fontStyle: 'italic', opacity: 0.7 }}>for Instagram</span>
+            </div>
+            <div style={{ fontSize: 14, lineHeight: 1.55, color: '#444', maxWidth: 580 }}>
+              One-gesture fact-checking triggered from the Instagram share sheet. Backend renders HTML; iOS Quick Look displays it.
+              Three directions, both themes, all states — plus a live prototype.
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14, marginTop: 4 }}>
+              {['A — Clinical Lab', 'B — Editorial', 'C — Calm System'].map((t, i) => (
+                <div key={t} style={{
+                  border: '1px solid #e4e2dc', borderRadius: 6, padding: 12,
+                  background: '#fff',
+                }}>
+                  <div style={{ fontSize: 11, letterSpacing: 1.4, textTransform: 'uppercase', color: '#777', marginBottom: 6, fontWeight: 600 }}>Direction {['A','B','C'][i]}</div>
+                  <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>{t.split('— ')[1]}</div>
+                  <div style={{ fontSize: 12, color: '#555', lineHeight: 1.5 }}>{Object.values(DIRECTION_NOTES)[i]}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ),
+      }],
+    },
+    directionSection('A', 'Clinical Lab', DirA_Processing, DirA_Verdict, DirA_Error),
+    directionSection('B', 'Editorial Authority', DirB_Processing, DirB_Verdict, DirB_Error),
+    directionSection('C', 'Calm System', DirC_Processing, DirC_Verdict, DirC_Error),
+  ];
+}
+
+function App() {
+  const sections = buildSections();
+  return (
+    <DesignCanvas>
+      {sections.map(sec => (
+        <DCSection key={sec.id} id={sec.id} title={sec.title}>
+          {sec.artboards.map(a => (
+            <DCArtboard key={a.id} id={a.id} label={a.label} width={a.width} height={a.height}>
+              {a.el}
+            </DCArtboard>
+          ))}
+        </DCSection>
+      ))}
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+# Secrets — API keys, session tokens. Never commit these.
+.env
+.env.*
+!.env.example
+cookies.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Claude Code local state
+.claude/
+
+# Design handoff zips (extracted dir is checked in; zips are redundant)
+Design.zip
+Ig Fact Checker-handoff.zip
+
+# Test fixtures — large binaries / IG-copyrighted content
+test_video.mp4
+reel_*.jpg
+reel_page.html
+video_frames/
+video_url.txt
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp

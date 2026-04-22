@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Fact Check — Prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #1a1a1d; min-height: 100vh; font-family: Inter, system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  @keyframes dirC_spin { to { transform: rotate(360deg); } }
+  @keyframes pulseDot { 0%,100% { opacity: 0.4 } 50% { opacity: 1 } }
+  .tweaks-panel { position: fixed; bottom: 20px; right: 20px; z-index: 999; width: 280px;
+    background: rgba(28,28,30,0.92); backdrop-filter: blur(16px); color: #f2f2f7;
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; padding: 14px 14px 12px;
+    font-size: 13px; box-shadow: 0 12px 40px rgba(0,0,0,0.5); }
+  .tweaks-title { font-size: 11px; letter-spacing: 1.2px; text-transform: uppercase;
+    color: rgba(255,255,255,0.5); margin-bottom: 10px; font-weight: 600; }
+  .tweak-row { margin-bottom: 10px; }
+  .tweak-row:last-child { margin-bottom: 0; }
+  .tweak-label { font-size: 11px; color: rgba(255,255,255,0.55); margin-bottom: 4px; letter-spacing: 0.4px; }
+  .tweak-seg { display: flex; background: rgba(120,120,128,0.24); border-radius: 7px; padding: 2px; gap: 2px; }
+  .tweak-seg button { flex: 1; border: 0; background: transparent; color: #f2f2f7; font-size: 12px;
+    padding: 6px 4px; border-radius: 6px; cursor: pointer; font-family: inherit; font-weight: 500; white-space: nowrap; }
+  .tweak-seg button.on { background: rgba(120,120,128,0.5); }
+  .stage { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 28px 20px 40px; }
+  .caption { color: rgba(255,255,255,0.5); font-size: 12px; letter-spacing: 0.4px; }
+  .kbd { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px;
+    border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px; color: rgba(255,255,255,0.7); }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" src="ios-frame.jsx"></script>
+<script type="text/babel" src="screens.jsx"></script>
+<script type="text/babel" src="direction-a.jsx"></script>
+<script type="text/babel" src="direction-b.jsx"></script>
+<script type="text/babel" src="direction-c.jsx"></script>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "direction": "C",
+  "theme": "light",
+  "state": "error",
+  "showAllSources": false
+}/*EDITMODE-END*/;
+
+const PROTO = {
+  // phase lifecycle: idle (pre-share) -> launching -> processing -> verdict -> dismissed
+};
+
+function useLS(key, initial) {
+  const [v, setV] = useState(() => {
+    try { const r = localStorage.getItem(key); return r === null ? initial : JSON.parse(r); }
+    catch { return initial; }
+  });
+  useEffect(() => { localStorage.setItem(key, JSON.stringify(v)); }, [key, v]);
+  return [v, setV];
+}
+
+function Seg({ value, options, onChange }) {
+  return (
+    <div className="tweak-seg">
+      {options.map(o => (
+        <button key={o.value} className={value === o.value ? 'on' : ''} onClick={() => onChange(o.value)}>
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TweaksPanel({ state, setState }) {
+  const [editMode, setEditMode] = useState(false);
+  useEffect(() => {
+    const onMsg = (e) => {
+      const d = e.data || {};
+      if (d.type === '__activate_edit_mode') setEditMode(true);
+      if (d.type === '__deactivate_edit_mode') setEditMode(false);
+    };
+    window.addEventListener('message', onMsg);
+    window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  const update = (patch) => {
+    setState(s => ({ ...s, ...patch }));
+    window.parent.postMessage({ type: '__edit_mode_set_keys', edits: patch }, '*');
+  };
+
+  if (!editMode) return null;
+
+  return (
+    <div className="tweaks-panel">
+      <div className="tweaks-title">Tweaks</div>
+      <div className="tweak-row">
+        <div className="tweak-label">Direction</div>
+        <Seg value={state.direction} onChange={v => update({ direction: v })}
+          options={[{ value: 'A', label: 'A · Lab' }, { value: 'B', label: 'B · Editorial' }, { value: 'C', label: 'C · Calm' }]}/>
+      </div>
+      <div className="tweak-row">
+        <div className="tweak-label">Theme</div>
+        <Seg value={state.theme} onChange={v => update({ theme: v })}
+          options={[{ value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }]}/>
+      </div>
+      <div className="tweak-row">
+        <div className="tweak-label">State</div>
+        <Seg value={state.state} onChange={v => update({ state: v })}
+          options={[
+            { value: 'processing', label: 'Proc' },
+            { value: 'false', label: 'False' },
+            { value: 'mostly_false', label: 'M·False' },
+            { value: 'mostly_accurate', label: 'M·True' },
+            { value: 'accurate', label: 'True' },
+            { value: 'unverified', label: "Can't" },
+            { value: 'error', label: 'Err' },
+          ]}/>
+      </div>
+      <div className="tweak-row">
+        <div className="tweak-label">Sources</div>
+        <Seg value={state.showAllSources ? 'all' : 'first'} onChange={v => update({ showAllSources: v === 'all' })}
+          options={[{ value: 'first', label: 'First 3' }, { value: 'all', label: 'All' }]}/>
+      </div>
+      <div className="tweak-row" style={{ display: 'flex', gap: 8 }}>
+        <button className="on" style={{
+          flex: 1, fontSize: 12, padding: '7px 10px', border: 0, borderRadius: 7,
+          background: '#0A84FF', color: 'white', fontWeight: 600, cursor: 'pointer',
+        }} onClick={() => {
+          update({ state: 'processing' });
+          setTimeout(() => update({ state: 'false' }), 5500);
+        }}>▶ Replay flow</button>
+      </div>
+    </div>
+  );
+}
+
+const DIR_COMPS = {
+  A: { Processing: DirA_Processing, Verdict: DirA_Verdict, Error: DirA_Error },
+  B: { Processing: DirB_Processing, Verdict: DirB_Verdict, Error: DirB_Error },
+  C: { Processing: DirC_Processing, Verdict: DirC_Verdict, Error: DirC_Error },
+};
+
+function CurrentScreen({ direction, theme, state, showAllSources, activeStep }) {
+  const D = DIR_COMPS[direction];
+  if (state === 'processing') return <D.Processing theme={theme} activeStep={activeStep} />;
+  if (state === 'error') return <D.Error theme={theme} />;
+  return <D.Verdict theme={theme} state={state} showAllSources={showAllSources} />;
+}
+
+function App() {
+  const [state, setState] = useLS('fc_proto_v1', TWEAK_DEFAULTS);
+  const [activeStep, setActiveStep] = useState(2);
+
+  // Animate processing step when in processing mode
+  useEffect(() => {
+    if (state.state !== 'processing') { setActiveStep(2); return; }
+    setActiveStep(0);
+    let i = 0;
+    const id = setInterval(() => {
+      i += 1;
+      if (i >= STEPS_REEL.length) { clearInterval(id); return; }
+      setActiveStep(i);
+    }, 900);
+    return () => clearInterval(id);
+  }, [state.state]);
+
+  // Merge edits from host persistence
+  useEffect(() => {
+    const onMsg = (e) => {
+      const d = e.data || {};
+      if (d.type === '__edit_mode_set_keys' && d.edits) setState(s => ({ ...s, ...d.edits }));
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, [setState]);
+
+  const dark = state.theme === 'dark';
+
+  return (
+    <div className="stage">
+      <div className="caption">
+        Fact Check — Direction {state.direction} · {state.theme} · {state.state}
+        &nbsp; · &nbsp; Tap <span className="kbd">Tweaks</span> (toolbar) to switch
+      </div>
+      <IOSDevice width={402} height={874} dark={dark}>
+        <div style={{ width: '100%', height: '100%' }}>
+          <CurrentScreen
+            direction={state.direction}
+            theme={state.theme}
+            state={state.state}
+            showAllSources={state.showAllSources}
+            activeStep={activeStep}
+          />
+        </div>
+      </IOSDevice>
+      <TweaksPanel state={state} setState={setState} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

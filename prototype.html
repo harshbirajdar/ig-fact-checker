@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Fact Check — Prototype</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  background: #000;
+  color: #fff;
+  min-height: 100vh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  overflow-x: hidden;
+}
+.screen { display: none; min-height: 100vh; }
+.screen.active { display: block; }
+
+.home-header { padding: 60px 20px 16px; }
+.home-title { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 4px; }
+.home-subtitle { color: #888; font-size: 15px; line-height: 1.4; }
+.home-instruction {
+  padding: 0 20px 16px;
+  color: #666;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-top: 24px;
+  font-weight: 600;
+}
+
+.reel {
+  margin: 0 20px 16px;
+  background: #1c1c1e;
+  border-radius: 16px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+.reel:active { transform: scale(0.98); }
+.reel-preview {
+  aspect-ratio: 9/12;
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  padding: 20px;
+}
+.reel-1 .reel-preview { background: linear-gradient(135deg, #ffd700, #ff6b35); }
+.reel-2 .reel-preview { background: linear-gradient(135deg, #1a1a2e, #6f1d6b); }
+.reel-3 .reel-preview { background: linear-gradient(135deg, #ffb347, #d2691e); }
+
+.reel-play {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 64px; height: 64px;
+  background: rgba(0,0,0,0.45);
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; color: #fff;
+}
+.reel-handle {
+  position: absolute; top: 14px; left: 14px;
+  font-size: 13px; font-weight: 600;
+  background: rgba(0,0,0,0.55);
+  padding: 5px 10px; border-radius: 12px;
+  color: #fff;
+}
+.reel-caption {
+  color: #fff; font-size: 14px; line-height: 1.4;
+  font-weight: 500;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+}
+.reel-action {
+  padding: 14px 16px;
+  display: flex; align-items: center; justify-content: space-between;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+.reel-action-label { font-size: 15px; color: #fff; font-weight: 500; }
+.reel-action-icon { color: #0a84ff; font-size: 15px; font-weight: 600; }
+
+.processing { padding: 80px 24px 24px; min-height: 100vh; display: flex; flex-direction: column; }
+.processing-title { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
+.processing-sub { color: #888; font-size: 15px; margin-bottom: 40px; }
+.step {
+  display: flex; align-items: center;
+  padding: 14px 0;
+  border-bottom: 1px solid #1c1c1e;
+}
+.step-icon {
+  width: 28px; height: 28px; border-radius: 50%;
+  margin-right: 14px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 600;
+  flex-shrink: 0;
+}
+.step.pending .step-icon { background: #1c1c1e; color: #444; }
+.step.active  .step-icon { background: #0a84ff; color: #fff; animation: pulse 1s infinite; }
+.step.done    .step-icon { background: #30d158; color: #fff; }
+.step-label { font-size: 16px; flex: 1; }
+.step.pending .step-label { color: #555; }
+.step.active  .step-label { color: #fff; font-weight: 500; }
+.step.done    .step-label { color: #888; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+.verdict-screen { padding: 50px 16px 40px; }
+.back {
+  display: inline-flex; align-items: center;
+  color: #0a84ff; font-size: 17px;
+  background: none; border: none; padding: 8px 0;
+  cursor: pointer; margin-bottom: 12px;
+  -webkit-appearance: none; font-family: inherit;
+}
+.verdict-card {
+  background: #1c1c1e;
+  border-radius: 20px;
+  overflow: hidden;
+}
+.verdict-banner { padding: 24px 20px; text-align: center; color: #fff; }
+.verdict-banner.false { background: linear-gradient(135deg, #ff3b30, #c41e3a); }
+.verdict-banner.mixed { background: linear-gradient(135deg, #ff9500, #ff6b00); }
+.verdict-banner.true  { background: linear-gradient(135deg, #30d158, #00a86b); }
+.verdict-label { font-size: 12px; font-weight: 700; letter-spacing: 2px; opacity: 0.85; margin-bottom: 6px; }
+.verdict-big   { font-size: 34px; font-weight: 800; letter-spacing: -0.5px; margin-bottom: 8px; }
+.verdict-confidence { font-size: 14px; opacity: 0.9; font-weight: 500; }
+
+.verdict-body { padding: 20px; }
+.section { margin-bottom: 20px; }
+.section:last-child { margin-bottom: 0; }
+.section-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
+  color: #888; font-weight: 700; margin-bottom: 8px;
+}
+.section-text { font-size: 15px; line-height: 1.5; color: #e5e5e7; }
+.claim-box {
+  background: #2c2c2e; padding: 12px 14px; border-radius: 10px;
+  font-style: italic; color: #c7c7cc;
+  border-left: 3px solid #48484a;
+  font-size: 14px; line-height: 1.45;
+}
+.source {
+  display: flex; align-items: flex-start;
+  padding: 10px 0;
+  border-bottom: 1px solid #2c2c2e;
+  text-decoration: none; color: #e5e5e7;
+}
+.source:last-child { border-bottom: none; }
+.source-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #0a84ff;
+  margin: 8px 10px 0 0; flex-shrink: 0;
+}
+.source-content { flex: 1; }
+.source-title { font-size: 14px; font-weight: 500; margin-bottom: 2px; }
+.source-domain { font-size: 12px; color: #0a84ff; }
+
+.audio-snippet {
+  background: #2c2c2e; padding: 12px 14px; border-radius: 10px;
+  font-size: 13px; color: #aeaeb2; line-height: 1.45;
+}
+.audio-snippet-label {
+  display: inline-block;
+  font-size: 10px; font-weight: 700; letter-spacing: 1px;
+  color: #0a84ff; margin-bottom: 6px;
+}
+
+.action-row { margin-top: 20px; display: flex; gap: 10px; }
+.btn {
+  flex: 1; padding: 14px;
+  border-radius: 14px; border: none;
+  font-size: 16px; font-weight: 600;
+  font-family: inherit; cursor: pointer;
+  -webkit-appearance: none;
+}
+.btn-primary   { background: #0a84ff; color: #fff; }
+.btn-secondary { background: #2c2c2e; color: #fff; }
+
+.disclaimer {
+  padding: 24px 20px 40px;
+  color: #555; font-size: 12px;
+  text-align: center; line-height: 1.5;
+}
+</style>
+</head>
+<body>
+
+<div class="screen active" id="home">
+  <div class="home-header">
+    <div class="home-title">Fact Check</div>
+    <div class="home-subtitle">Tap a sample reel to see the verdict flow.</div>
+  </div>
+  <div class="home-instruction">Sample reels</div>
+
+  <div class="reel reel-1" data-reel="0">
+    <div class="reel-preview">
+      <div class="reel-handle">@wellness.daily</div>
+      <div class="reel-play">&#9654;</div>
+      <div class="reel-caption">Drink lemon water every morning and burn 500 calories without lifting a finger 🍋✨</div>
+    </div>
+    <div class="reel-action">
+      <div class="reel-action-label">Share → Fact Check</div>
+      <div class="reel-action-icon">Check ›</div>
+    </div>
+  </div>
+
+  <div class="reel reel-2" data-reel="1">
+    <div class="reel-preview">
+      <div class="reel-handle">@truth.seeker</div>
+      <div class="reel-play">&#9654;</div>
+      <div class="reel-caption">NASA confirms 15 days of total darkness coming in November 🌑 the sun will disappear</div>
+    </div>
+    <div class="reel-action">
+      <div class="reel-action-label">Share → Fact Check</div>
+      <div class="reel-action-icon">Check ›</div>
+    </div>
+  </div>
+
+  <div class="reel reel-3" data-reel="2">
+    <div class="reel-preview">
+      <div class="reel-handle">@kitchen.facts</div>
+      <div class="reel-play">&#9654;</div>
+      <div class="reel-caption">Honey never spoils — they found edible honey in Egyptian tombs 🍯</div>
+    </div>
+    <div class="reel-action">
+      <div class="reel-action-label">Share → Fact Check</div>
+      <div class="reel-action-icon">Check ›</div>
+    </div>
+  </div>
+
+  <div class="disclaimer">
+    Prototype · All results are pre-written mock data<br>
+    Real version would use Claude + web search + Whisper transcription
+  </div>
+</div>
+
+<div class="screen" id="processing">
+  <div class="processing">
+    <div class="processing-title">Fact-checking reel…</div>
+    <div class="processing-sub">Usually takes 8–15 seconds.</div>
+    <div id="steps"></div>
+  </div>
+</div>
+
+<div class="screen" id="verdict">
+  <div class="verdict-screen">
+    <button class="back" onclick="goHome()">‹ Check another</button>
+    <div class="verdict-card" id="verdictCard"></div>
+    <div class="action-row">
+      <button class="btn btn-secondary" onclick="alert('Summary copied (mock)')">Copy summary</button>
+      <button class="btn btn-primary" onclick="goHome()">Done</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const reels = [
+  {
+    verdict: 'false',
+    label: 'FALSE',
+    confidence: '95% confidence',
+    claim: '"Drink lemon water every morning and burn 500 calories without lifting a finger."',
+    transcript: '"…just one glass of warm lemon water in the morning torches up to 500 calories daily. Your metabolism goes into overdrive…"',
+    tldr: 'Drinking lemon water does not burn 500 calories. A glass of lemon water contains ~6 calories and has no proven metabolism-boosting effect of that magnitude. No peer-reviewed study supports the claim.',
+    sources: [
+      { title: 'Lemon water: separating fact from fad', domain: 'healthline.com' },
+      { title: 'Does drinking water burn calories?', domain: 'mayoclinic.org' },
+      { title: 'Review of "fat-burning" drink claims', domain: 'health.harvard.edu' }
+    ]
+  },
+  {
+    verdict: 'false',
+    label: 'FALSE',
+    confidence: '99% confidence',
+    claim: '"NASA confirms 15 days of total darkness coming in November."',
+    transcript: '"…NASA just announced it. For 15 straight days, the sun will not rise. Governments are hiding it…"',
+    tldr: 'NASA has made no such announcement. This is a recurring hoax that has circulated since 2015. There is no astronomical event that can produce 15 days of darkness on Earth.',
+    sources: [
+      { title: 'NASA statement: no "days of darkness" event', domain: 'nasa.gov' },
+      { title: 'Fact check: 15 days of darkness hoax resurfaces', domain: 'reuters.com' },
+      { title: 'Snopes: the recurring blackout hoax', domain: 'snopes.com' }
+    ]
+  },
+  {
+    verdict: 'true',
+    label: 'ACCURATE',
+    confidence: '90% confidence',
+    claim: '"Honey never spoils — they found edible honey in Egyptian tombs."',
+    transcript: '"…honey literally never goes bad. Archaeologists opened Egyptian tombs and the honey was still good to eat after 3000 years…"',
+    tldr: 'Largely accurate. Honey\'s low moisture, low pH, and hydrogen peroxide content prevent microbial growth, so sealed honey can last indefinitely. Edible honey has been reported from Egyptian tombs. Caveat: crystallization is normal, and contaminated or diluted honey can spoil.',
+    sources: [
+      { title: 'The science of why honey lasts forever', domain: 'smithsonianmag.com' },
+      { title: 'Honey storage and shelf life', domain: 'usda.gov' },
+      { title: 'Ancient honey: archaeological evidence', domain: 'nationalgeographic.com' }
+    ]
+  }
+];
+
+const steps = [
+  'Uploading video',
+  'Extracting audio',
+  'Transcribing speech',
+  'Reading on-screen text',
+  'Searching the web',
+  'Cross-referencing sources',
+  'Writing verdict'
+];
+
+function goHome() {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('home').classList.add('active');
+  window.scrollTo(0, 0);
+}
+
+function showProcessing(reelIndex) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('processing').classList.add('active');
+  window.scrollTo(0, 0);
+
+  const stepsEl = document.getElementById('steps');
+  stepsEl.innerHTML = steps.map((label, i) => `
+    <div class="step pending" data-i="${i}">
+      <div class="step-icon">${i+1}</div>
+      <div class="step-label">${label}</div>
+    </div>
+  `).join('');
+
+  let i = 0;
+  function tick() {
+    const stepEls = stepsEl.querySelectorAll('.step');
+    if (i > 0) {
+      stepEls[i-1].classList.remove('active');
+      stepEls[i-1].classList.add('done');
+      stepEls[i-1].querySelector('.step-icon').textContent = '✓';
+    }
+    if (i < steps.length) {
+      stepEls[i].classList.remove('pending');
+      stepEls[i].classList.add('active');
+      i++;
+      setTimeout(tick, 850 + Math.random() * 500);
+    } else {
+      setTimeout(() => showVerdict(reelIndex), 400);
+    }
+  }
+  tick();
+}
+
+function showVerdict(reelIndex) {
+  const r = reels[reelIndex];
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('verdict').classList.add('active');
+  window.scrollTo(0, 0);
+
+  document.getElementById('verdictCard').innerHTML = `
+    <div class="verdict-banner ${r.verdict}">
+      <div class="verdict-label">VERDICT</div>
+      <div class="verdict-big">${r.label}</div>
+      <div class="verdict-confidence">${r.confidence}</div>
+    </div>
+    <div class="verdict-body">
+      <div class="section">
+        <div class="section-label">The claim</div>
+        <div class="claim-box">${r.claim}</div>
+      </div>
+      <div class="section">
+        <div class="section-label">Audio transcript (excerpt)</div>
+        <div class="audio-snippet">
+          <div class="audio-snippet-label">🎙 DETECTED SPEECH</div>
+          ${r.transcript}
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-label">What we found</div>
+        <div class="section-text">${r.tldr}</div>
+      </div>
+      <div class="section">
+        <div class="section-label">Sources</div>
+        ${r.sources.map(s => `
+          <a class="source" href="#" onclick="event.preventDefault()">
+            <div class="source-dot"></div>
+            <div class="source-content">
+              <div class="source-title">${s.title}</div>
+              <div class="source-domain">${s.domain}</div>
+            </div>
+          </a>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+document.querySelectorAll('.reel').forEach(el => {
+  el.addEventListener('click', () => {
+    showProcessing(parseInt(el.dataset.reel));
+  });
+});
+</script>
+</body>
+</html>

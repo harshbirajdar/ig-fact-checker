@@ -1,0 +1,306 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="color-scheme" content="light dark">
+<title>Fact Check</title>
+<style>
+  /* ── Page tokens (Direction C — Calm System) ─────────────────────── */
+  :root {
+    --bg: #f2f2f7;
+    --ink: #1c1c1e;
+    --muted: #8e8e93;
+    --line: rgba(60,60,67,0.12);
+    --card: #ffffff;
+    --card-border: 0 solid transparent;
+    --card-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    --chip-bg: rgba(120,120,128,0.12);
+    --error-icon-bg: #FFE5E3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000000;
+      --ink: #ffffff;
+      --muted: #8e8e93;
+      --line: rgba(84,84,88,0.35);
+      --card: #1c1c1e;
+      --card-border: 1px solid rgba(84,84,88,0.30);
+      --card-shadow: none;
+      --chip-bg: rgba(120,120,128,0.24);
+      --error-icon-bg: #3a1f1d;
+    }
+  }
+
+  /* Tone tokens — set on .v-body.tone-<name> */
+  .tone-false      { --banner-from:#FF3B30; --banner-to:#E6352B; --accent:#FF3B30; --banner-shadow: 0 6px 20px rgba(255,59,48,0.25); --banner-fg:#ffffff; }
+  .tone-context    { --banner-from:#FF9500; --banner-to:#E68600; --accent:#FF9500; --banner-shadow: 0 6px 20px rgba(255,149,0,0.25); --banner-fg:#ffffff; }
+  .tone-accurate   { --banner-from:#34C759; --banner-to:#2FB350; --accent:#34C759; --banner-shadow: 0 6px 20px rgba(52,199,89,0.25);  --banner-fg:#ffffff; }
+  .tone-unverified { --banner-from:#8E8E93; --banner-to:#808084; --accent:#8E8E93; --banner-shadow: 0 6px 20px rgba(142,142,147,0.25); --banner-fg:#ffffff; }
+  @media (prefers-color-scheme: dark) {
+    .tone-false      { --banner-from:#FF453A; --banner-to:#E63E34; --accent:#FF453A; --banner-shadow: 0 6px 20px rgba(255,69,58,0.25); }
+    .tone-context    { --banner-from:#FF9F0A; --banner-to:#E68F09; --accent:#FF9F0A; --banner-shadow: 0 6px 20px rgba(255,159,10,0.25); --banner-fg:#1c1c1e; }
+    .tone-accurate   { --banner-from:#30D158; --banner-to:#2BBC4F; --accent:#30D158; --banner-shadow: 0 6px 20px rgba(48,209,88,0.25); }
+    .tone-unverified { --banner-from:#98989F; --banner-to:#89898F; --accent:#98989F; --banner-shadow: 0 6px 20px rgba(152,152,159,0.25); }
+  }
+
+  /* ── Reset ───────────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, "SF Pro Text", "SF Pro Display", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100%;
+  }
+  body {
+    padding-top: 88px;                     /* iOS status bar + Quick Look header reserve */
+    padding-bottom: 40px;
+    min-height: 100vh;
+  }
+
+  /* ── Header chrome (page title + Done) ───────────────────────────── */
+  .hdr-title {
+    position: absolute; top: 60px; left: 0; right: 0;
+    text-align: center; z-index: 4;
+    color: var(--ink); font-size: 17px; font-weight: 600;
+  }
+  .hdr-done {
+    position: absolute; top: 60px; right: 20px; z-index: 5;
+    color: #007AFF; font-size: 17px; font-weight: 600;
+  }
+
+  /* ── PROCESSING ──────────────────────────────────────────────────── */
+  .proc-body { padding: 0 20px; }
+  .h-proc {
+    font-size: 34px; font-weight: 700; letter-spacing: -0.6px;
+    color: var(--ink); margin-bottom: 4px; line-height: 1.1;
+  }
+  .h-sub { font-size: 16px; color: var(--muted); }
+  .proc-card {
+    margin-top: 24px;
+    background: var(--card);
+    border-radius: 16px;
+    border: var(--card-border);
+    box-shadow: var(--card-shadow);
+    overflow: hidden;
+  }
+  .step {
+    display: flex; align-items: center; gap: 14px;
+    padding: 14px 16px;
+    border-bottom: 0.5px solid var(--line);
+  }
+  .step:last-child { border-bottom: none; }
+  .step-slot {
+    width: 22px; height: 22px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step-done-dot {
+    width: 22px; height: 22px; border-radius: 99px;
+    background: #34C759;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step-active-spin {
+    width: 18px; height: 18px; border-radius: 99px;
+    border: 2px solid rgba(0,122,255,0.2);
+    border-top-color: #007AFF;
+    animation: dirC_spin 0.9s linear infinite;
+  }
+  .step-pending-dot {
+    width: 16px; height: 16px; border-radius: 99px;
+    border: 1.5px solid var(--muted);
+    opacity: 0.4;
+  }
+  @keyframes dirC_spin { to { transform: rotate(360deg); } }
+  .step-label { flex: 1; font-size: 16px; color: var(--ink); font-weight: 400; }
+  .step-label.done   { color: var(--muted); }
+  .step-label.active { font-weight: 600; }
+  .proc-foot { margin-top: 24px; text-align: center; font-size: 13px; color: var(--muted); }
+
+  /* ── VERDICT ─────────────────────────────────────────────────────── */
+  .v-body { padding: 0 16px; }
+
+  .banner {
+    margin-top: 6px;
+    border-radius: 22px;
+    padding: 18px 20px 20px;
+    background: linear-gradient(135deg, var(--banner-from) 0%, var(--banner-from) 60%, var(--banner-to) 100%);
+    color: var(--banner-fg);
+    position: relative; overflow: hidden;
+    box-shadow: var(--banner-shadow);
+  }
+  .banner-sheen {
+    position: absolute; top: -40px; right: -40px;
+    width: 160px; height: 160px; border-radius: 99px;
+    background: rgba(255,255,255,0.1);
+    pointer-events: none;
+  }
+  .banner-label {
+    font-size: 11px; letter-spacing: 1.4px; text-transform: uppercase;
+    font-weight: 700; opacity: 0.9; margin-bottom: 10px;
+  }
+  .banner-word {
+    font-size: 44px; line-height: 1; letter-spacing: -1px;
+    font-weight: 700; margin-bottom: 22px;
+  }
+  .banner-certainty {
+    display: flex; align-items: center; gap: 10px;
+    padding-top: 14px; border-top: 1px solid rgba(255,255,255,0.2);
+  }
+  .banner-certainty-label { font-size: 12px; font-weight: 500; opacity: 0.85; letter-spacing: 0.1px; }
+  .banner-certainty-num {
+    margin-left: auto; font-size: 15px; font-weight: 700;
+    font-variant-numeric: tabular-nums; letter-spacing: -0.2px;
+  }
+  /* NEEDS CONTEXT in dark mode uses dark ink on orange — adjust internal contrast */
+  @media (prefers-color-scheme: dark) {
+    .tone-context .banner-certainty { border-top-color: rgba(0,0,0,0.18); }
+    .tone-context .banner-sheen { background: rgba(255,255,255,0.06); }
+  }
+
+  .card {
+    margin-top: 12px;
+    background: var(--card);
+    border-radius: 18px;
+    padding: 16px 18px;
+    border: var(--card-border);
+  }
+  .card.first-after-banner { margin-top: 14px; }
+  .card-label {
+    font-size: 12px; letter-spacing: 0.4px; text-transform: uppercase;
+    color: var(--muted); font-weight: 600; margin-bottom: 8px;
+  }
+
+  .claim-text { font-size: 17px; line-height: 1.4; color: var(--ink); font-style: italic; }
+  .chips { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .chip {
+    font-size: 12px; padding: 4px 9px; border-radius: 99px;
+    background: var(--chip-bg); color: var(--ink); font-weight: 500;
+  }
+
+  .transcript-text { font-size: 14px; line-height: 1.5; color: var(--muted); }
+  .findings-text   { font-size: 15px; line-height: 1.5; color: var(--ink); }
+
+  /* Sources */
+  .sources-card { padding: 4px 0 0; overflow: hidden; }
+  .sources-head {
+    padding: 14px 18px 8px;
+    font-size: 12px; letter-spacing: 0.4px; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+  }
+  .source {
+    padding: 12px 18px;
+    border-top: 0.5px solid var(--line);
+    display: flex; align-items: center; gap: 10px;
+    text-decoration: none; color: inherit;
+  }
+  .source-body  { flex: 1; min-width: 0; }
+  .source-title {
+    font-size: 15px; color: var(--ink); line-height: 1.3;
+    margin-bottom: 2px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .source-domain { font-size: 12px; color: var(--accent); font-weight: 500; }
+  .source-link   { width: 14px; height: 14px; color: var(--muted); opacity: 0.5; flex-shrink: 0; }
+
+  /* <details> "Show N more" — no JS; summary styled as a source row; hidden when open */
+  .sources-details > summary {
+    list-style: none;
+    padding: 13px 18px;
+    border-top: 0.5px solid var(--line);
+    text-align: center;
+    font-size: 15px; color: var(--accent); font-weight: 500;
+    cursor: pointer;
+  }
+  .sources-details > summary::-webkit-details-marker { display: none; }
+  .sources-details[open] > summary { display: none; }
+
+  /* ── ERROR ───────────────────────────────────────────────────────── */
+  .err-body { padding: 60px 24px 0; }
+  .err-icon {
+    width: 64px; height: 64px; border-radius: 99px;
+    background: var(--error-icon-bg);
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 20px;
+  }
+  .err-title { font-size: 28px; font-weight: 700; letter-spacing: -0.4px; color: var(--ink); margin-bottom: 10px; }
+  .err-sub   { font-size: 16px; color: var(--muted); line-height: 1.45; margin-bottom: 28px; }
+  .err-info {
+    background: var(--card); border-radius: 14px;
+    padding: 14px 16px;
+    border: var(--card-border);
+    font-size: 14px; color: var(--muted); line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+  <div class="hdr-title">Fact Check</div>
+  <div class="hdr-done">Done</div>
+
+  
+  
+  <div class="proc-body">
+    <div class="h-proc">Fact-checking…</div>
+    <div class="h-sub">Analyzing the shared post</div>
+    
+    <div class="proc-card">
+      
+        
+        
+        <div class="step">
+          <div class="step-slot">
+            
+              <div class="step-done-dot">
+                <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                  <path d="M3 7L5.5 9.5L10 4" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+            
+          </div>
+          <div class="step-label done">Fetching post data</div>
+        </div>
+      
+        
+        
+        <div class="step">
+          <div class="step-slot">
+            
+              <div class="step-active-spin"></div>
+            
+          </div>
+          <div class="step-label active">Searching the web</div>
+        </div>
+      
+        
+        
+        <div class="step">
+          <div class="step-slot">
+            
+              <div class="step-pending-dot"></div>
+            
+          </div>
+          <div class="step-label">Cross-referencing sources</div>
+        </div>
+      
+        
+        
+        <div class="step">
+          <div class="step-slot">
+            
+              <div class="step-pending-dot"></div>
+            
+          </div>
+          <div class="step-label">Writing verdict</div>
+        </div>
+      
+    </div>
+    <div class="proc-foot">This usually takes 8–15 seconds</div>
+  </div>
+
+  
+  
+</body>
+</html>
