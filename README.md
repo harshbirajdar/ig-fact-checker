@@ -142,6 +142,20 @@ git push
 
 Pushes to `main` auto-deploy to Cloud Run via the `fact-check-deploy-main` Cloud Build trigger (config: [cloudbuild.yaml](cloudbuild.yaml)). Manual deploy (above) is only needed if CI/CD is down.
 
+## Security scanning
+
+| Tool | What it checks | Where |
+|---|---|---|
+| **Dependabot alerts** | Known CVEs in Python deps (`requirements.txt`) and Docker base images | GitHub (Security tab). Enabled at the repo level. |
+| **Dependabot security updates** | Auto-opens PRs to fix vulnerable deps | GitHub. Enabled at the repo level. |
+| **Dependabot version updates** | Proactive weekly PRs to bump non-vulnerable-but-outdated deps | Config: [.github/dependabot.yml](.github/dependabot.yml) |
+| **pip-audit** | On-demand CVE check on `requirements.txt` (same data, runs in CI) | CI: [.github/workflows/security-scan.yml](.github/workflows/security-scan.yml) |
+| **Bandit** | Static analysis for insecure Python patterns (hardcoded secrets, injection, weak crypto, etc.) | Same workflow, medium+ severity gate |
+
+Not using CodeQL — it requires GitHub Advanced Security, which isn't available on private repos on free personal plans. The pip-audit + Bandit combo covers the realistic threat surface for a Python-only backend (our stack).
+
+The Security tab on GitHub shows any live alerts. There are zero open alerts at time of writing.
+
 ## Lessons learned: talking to Instagram anonymously
 
 We burned about a day of outages and three iterations figuring this out. Notes here so future-me doesn't repeat them.

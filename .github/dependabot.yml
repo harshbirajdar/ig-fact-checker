@@ -1,0 +1,45 @@
+# Dependabot: automated dependency updates.
+# Security alerts are enabled separately at the repo level (Settings →
+# Code security) and run regardless of this file. This file controls
+# proactive version-update PRs (e.g. "bump instaloader 4.15 → 4.16").
+version: 2
+updates:
+  # Python deps in backend/requirements.txt
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "deps"
+
+  # Docker base image in backend/Dockerfile
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Kolkata"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "deps"
+
+  # GitHub Actions in .github/workflows/
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci"

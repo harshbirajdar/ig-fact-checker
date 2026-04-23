@@ -1,0 +1,56 @@
+name: Security scan
+
+# Scans Python dependencies for known CVEs (pip-audit) and Python source
+# for common security anti-patterns (bandit). Runs on every push to main,
+# every pull request, and weekly. A free-plan substitute for CodeQL, which
+# requires GitHub Advanced Security for private repos.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/security-scan.yml"
+  pull_request:
+    branches: [main]
+  schedule:
+    # Monday 03:30 UTC = 09:00 IST (Harsh's timezone)
+    - cron: "30 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-security:
+    name: Python deps + static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install scan tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit bandit
+
+      - name: pip-audit (check dependencies against CVE database)
+        run: |
+          pip-audit \
+            --requirement backend/requirements.txt \
+            --strict \
+            --desc
+
+      - name: bandit (static security linter on backend/)
+        # --severity-level medium: ignore low-severity noise.
+        # --skip B101: allow `assert` statements (not a real risk for our code).
+        # Excludes .venv and __pycache__ via --exclude.
+        run: |
+          bandit \
+            --recursive backend/ \
+            --exclude backend/.venv,backend/__pycache__ \
+            --severity-level medium \
+            --skip B101
