@@ -228,6 +228,8 @@ Internal mapping: `verdict` key → CSS tone class → display word
 - No authentication bypass, no session cookies, no third-party scraping services.
 - Still technically "automated access" per Meta TOS; acceptable at personal scale.
 - **Rate-limit posture:** `max_connection_attempts=2` (one retry max). On sustained 403/429 we surface `rate_limited` to the user rather than hammering IG — this is a deliberate "respect the rate limit, don't get flagged" choice, not a usability optimization.
+- **Circuit breaker:** once IG rate-limits us, `cache.mark_ig_rate_limited()` stores a cooldown timestamp in Firestore. For the next `RATE_LIMIT_COOLDOWN_SECONDS` (30 min), every `/check` short-circuits at `fetch_ig_metadata` with `IGRateLimitError` WITHOUT calling IG. This matters because every call *during* a cooldown extends IG's flag on our IP; doing nothing shortens it. Frustrated user re-taps during cooldown are free (no IG impact).
+- **Do not batch-test this path against real IG.** See the comment block above `fetch_ig_metadata` in `pipeline.py` for the incident history. Use fixture IGMedia data for pipeline testing instead.
 - Self-rate-limit to ≤100/day.
 
 ### 5.7 Error handling

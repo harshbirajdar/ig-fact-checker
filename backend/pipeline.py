@@ -95,6 +95,24 @@ class IGMedia:
 
 
 # ── IG fetch via instaloader ────────────────────────────────────────────────
+#
+# ┌─ DEV WARNING — READ BEFORE EDITING fetch_ig_metadata ──────────────────┐
+# │ DO NOT batch-test this function against real IG URLs.                  │
+# │                                                                        │
+# │ Every call hits Instagram's GraphQL endpoint. Anonymous calls from     │
+# │ datacenter IPs (Cloud Run, GitHub Codespaces, etc.) share a per-IP     │
+# │ rate limit that IG throttles aggressively. Running more than ~5 real   │
+# │ queries in quick succession — OR mixing laptop + Cloud Run testing     │
+# │ in the same hour — will trip IG's cooldown and lock production out     │
+# │ of IG for 15-60 minutes.                                               │
+# │                                                                        │
+# │ This happened on 2026-04-23: a 26-URL instaloader verification run +   │
+# │ a Cloud Run smoke test + real user traffic all in the same afternoon   │
+# │ tripped the flag. See cache.mark_ig_rate_limited circuit breaker.      │
+# │                                                                        │
+# │ For changes needing broader coverage, use cached IGMedia fixtures      │
+# │ (dataclass snapshots), NOT real URLs. Test one real URL max per push.  │
+# └────────────────────────────────────────────────────────────────────────┘
 def extract_shortcode(url: str) -> str:
     m = SHORTCODE_RE.search(url)
     if not m:
@@ -126,7 +144,13 @@ def _loader() -> "object":
 
 
 def fetch_ig_metadata(url: str) -> IGMedia:
-    """Resolve an IG URL to structured metadata using instaloader (anonymous)."""
+    """Resolve an IG URL to structured metadata using instaloader (anonymous).
+
+    Protected by the circuit breaker in cache.py: if IG recently rate-limited
+    us, we skip the IG call entirely and raise IGRateLimitError so the cooldown
+    drains rather than extends.
+    """
+    import cache  # local import: avoid circular with main.py at import time
     import instaloader
     from instaloader.exceptions import (
         BadResponseException,
@@ -137,6 +161,15 @@ def fetch_ig_metadata(url: str) -> IGMedia:
     )
 
     shortcode = extract_shortcode(url)
+
+    # Circuit breaker: if we're in cooldown, don't even try IG. Every call
+    # during the cooldown extends IG's flag on our IP; doing nothing shortens it.
+    remaining = cache.ig_cooldown_remaining()
+    if remaining > 0:
+        log.info("IG circuit breaker OPEN; %ds remaining, skipping fetch for %s",
+                 remaining, shortcode)
+        raise IGRateLimitError(f"In IG cooldown for {remaining}s more")
+
     L = _loader()
 
     try:
@@ -152,11 +185,13 @@ def fetch_ig_metadata(url: str) -> IGMedia:
         # "try again" rather than a generic error, per PRD §5.7.
         msg = str(e).lower()
         if "403" in msg or "rate" in msg or "bad response" in msg:
+            cache.mark_ig_rate_limited()
             raise IGRateLimitError(f"IG rate-limited or refused: {e}") from e
         raise IGFetchError(f"IG returned bad response: {e}") from e
     except ConnectionException as e:
         # Network error after retry cap exhausted. Treat as rate-limit
         # (conservative) so the user retries rather than assuming it's broken.
+        cache.mark_ig_rate_limited()
         raise IGRateLimitError(f"IG connection exhausted: {e}") from e
 
     # ── Map post to IGMedia ────────────────────────────────────────────────

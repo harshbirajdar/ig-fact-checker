@@ -16,6 +16,13 @@ log = logging.getLogger("fact_check.cache")
 TTL_SECONDS = 7 * 24 * 3600
 COLLECTION = "fact_check_cache"
 
+# Circuit breaker: when IG rate-limits us, we stop calling IG entirely for
+# this long. Retrying during the cooldown extends IG's flag on our IP —
+# doing nothing shortens it. 30 min chosen as a middle ground between
+# "user perception of 'broken'" and "IG's 'please wait a few minutes'".
+RATE_LIMIT_COOLDOWN_SECONDS = 30 * 60
+_RATE_LIMIT_DOC = "_ig_rate_limit"
+
 _client = None
 
 
@@ -78,3 +85,36 @@ def put(shortcode: str, verdict: dict[str, Any]) -> None:
         log.info("cache PUT %s", shortcode)
     except Exception as e:
         log.warning("cache put failed for %s: %s", shortcode, e)
+
+
+# ── IG rate-limit circuit breaker ───────────────────────────────────────────
+def ig_cooldown_remaining() -> int:
+    """Seconds left on IG's timeout, or 0 if we're free to call IG."""
+    db = _db()
+    if db is None:
+        return 0
+    try:
+        snap = db.collection(COLLECTION).document(_RATE_LIMIT_DOC).get()
+        if not snap.exists:
+            return 0
+        until = (snap.to_dict() or {}).get("until", 0)
+        remaining = int(until - time.time())
+        return remaining if remaining > 0 else 0
+    except Exception as e:
+        log.warning("cooldown read failed: %s", e)
+        return 0
+
+
+def mark_ig_rate_limited(cooldown_seconds: int = RATE_LIMIT_COOLDOWN_SECONDS) -> None:
+    """Flip the circuit breaker. Subsequent calls to IG skipped for this long."""
+    db = _db()
+    if db is None:
+        return
+    try:
+        db.collection(COLLECTION).document(_RATE_LIMIT_DOC).set({
+            "until": time.time() + cooldown_seconds,
+            "tripped_at": time.time(),
+        })
+        log.warning("IG rate-limit circuit breaker TRIPPED for %ds", cooldown_seconds)
+    except Exception as e:
+        log.warning("cooldown write failed: %s", e)

@@ -49,6 +49,16 @@ ERROR_COPY: dict[str, str] = {
     "backend_error": "Something went wrong on our end.",
 }
 
+# Secondary copy shown inside the small info card below the error message.
+# Each value is tailored to the error_reason so the user isn't told about a
+# private account when it's actually a rate-limit, etc.
+ERROR_INFO: dict[str, str] = {
+    "private_or_deleted": "Try sharing again in a moment. If the account is private, Fact Check can't see the post.",
+    "rate_limited": "Instagram limits how often our server can request post data. Wait a few minutes and share the same link again — it should work.",
+    "timeout": "The check usually finishes in 8–15 seconds. If this keeps happening, the post may have unusually large media.",
+    "backend_error": "Try again in a moment. If it keeps failing, the post may have features Fact Check doesn't support yet.",
+}
+
 # Ring geometry (size=28, stroke=3)
 _RING_R = (28 - 3) / 2
 _RING_C = 2 * math.pi * _RING_R
@@ -82,7 +92,11 @@ def _verdict_context(data: dict[str, Any]) -> dict[str, Any]:
 def _error_response(request: Request, error_reason: str) -> HTMLResponse:
     return templates.TemplateResponse(
         request, "verdict.html",
-        {"screen_type": "error", "error_copy": ERROR_COPY.get(error_reason, ERROR_COPY["backend_error"])},
+        {
+            "screen_type": "error",
+            "error_copy": ERROR_COPY.get(error_reason, ERROR_COPY["backend_error"]),
+            "error_info": ERROR_INFO.get(error_reason, ERROR_INFO["backend_error"]),
+        },
         status_code=200,
     )
 
@@ -152,6 +166,7 @@ async def status(job_id: str) -> JSONResponse:
         err_html = templates.get_template("verdict.html").render({
             "screen_type": "error",
             "error_copy": ERROR_COPY["backend_error"],
+            "error_info": ERROR_INFO["backend_error"],
         })
         return JSONResponse({"status": "error", "html": err_html})
 
@@ -160,9 +175,11 @@ async def status(job_id: str) -> JSONResponse:
         return JSONResponse({"status": "complete", "html": html})
 
     if job["status"] == "error":
+        reason = job.get("error_reason", "backend_error")
         err_html = templates.get_template("verdict.html").render({
             "screen_type": "error",
             "error_copy": job.get("error_copy", ERROR_COPY["backend_error"]),
+            "error_info": ERROR_INFO.get(reason, ERROR_INFO["backend_error"]),
         })
         return JSONResponse({"status": "error", "html": err_html})
 
