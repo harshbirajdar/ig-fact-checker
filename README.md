@@ -12,7 +12,11 @@ Instagram reel/post
   ▼  POST url to backend /check
   │
 Backend (Cloud Run · Python/FastAPI):
-  1. Resolve metadata via `instaloader` (anonymous, no cookies) — handles images, reels, and carousels uniformly
+  1. Resolve metadata — hybrid fetcher (both anonymous, no cookies):
+     a. Primary: httpx GET to the HTML endpoint (/p/<shortcode>/). Gentle
+        rate-limit from datacenter IPs; handles most posts.
+     b. Fallback: instaloader via IG's GraphQL endpoint. Tight rate-limit;
+        guarded by a circuit breaker. Only used when HTML is a SPA shell.
   2. Download media:
      - Image post → the single image URL
      - Reel → the MP4 + ffmpeg → 5 frames @ 1 fps + 60-sec audio clip
@@ -60,7 +64,7 @@ Out of scope: Stories, IGTV, private accounts, DM-shared content. See PRD §3.
 | CI/CD | Cloud Build trigger `fact-check-deploy-main` (push to `main` → build → deploy) |
 | Cache | Firestore (`fact_check_cache` collection) |
 | Jobs | Firestore (`fact_check_jobs` collection, for async processing polling) |
-| IG fetch | `instaloader` Python library — anonymous, no cookies |
+| IG fetch | Hybrid: `httpx` HTML scrape (primary) + `instaloader` GraphQL fallback. Both anonymous, no cookies |
 | LLM | Claude Sonnet 4.6 with `web_search` tool |
 | ASR | Groq `whisper-large-v3-turbo` (non-fatal if it fails) |
 | Media | ffmpeg (bundled into Docker image) |
@@ -137,3 +141,50 @@ git push
 ```
 
 Pushes to `main` auto-deploy to Cloud Run via the `fact-check-deploy-main` Cloud Build trigger (config: [cloudbuild.yaml](cloudbuild.yaml)). Manual deploy (above) is only needed if CI/CD is down.
+
+## Lessons learned: talking to Instagram anonymously
+
+We burned about a day of outages and three iterations figuring this out. Notes here so future-me doesn't repeat them.
+
+### 1. Hand-rolled HTML scrape → works, until it doesn't
+
+Original approach: `httpx.get('/p/<shortcode>/')` and parse the embedded `<script type="application/json">` blocks for the media object. Worked reliably for a while, then started returning "could not locate media metadata" for a growing share of posts.
+
+**What changed:** Instagram rolled out SPA-style page loads for many accounts. The initial HTML response became a minimal shell; the real media JSON is fetched client-side via XHR after React hydration. Our scraper can't see data that isn't in the HTML.
+
+**BUT — crucially, not for everyone.** Cloud Run's datacenter IPs appear to be treated as crawlers and still receive the pre-rendered HTML variant with the JSON blocks. Residential IPs (like my laptop) get the SPA shell. This was the key diagnostic we missed on the first pass: local testing ≠ production behavior for this endpoint.
+
+### 2. Instaloader → works, but the GraphQL endpoint is the rate-limit minefield
+
+Second iteration: switch to `instaloader`, which calls IG's GraphQL API (`/graphql/query`). It handles everything (images/reels/carousels) and tracks IG's changes. Clean code.
+
+**What we didn't appreciate:** IG throttles the **GraphQL endpoint** much, *much* more aggressively than the HTML endpoint from datacenter IPs. A burst of ~30 GraphQL calls over a few hours (our verification tests + real traffic combined) tripped a rate-limit that lasted **half a day**.
+
+Once tripped, IG responds with `401 Unauthorized` and the message `"Please wait a few minutes before you try again."` — with **no `Retry-After` header** and no structured hint for how long to wait. "A few minutes" was empirically several hours. **Re-probing extends the flag.**
+
+Notably, during this GraphQL cooldown, the HTML endpoint kept serving data to the same IP. Two different rate-limit counters.
+
+### 3. Hybrid (HTML primary + instaloader fallback) → resolves both
+
+Current approach. HTML path handles the vast majority of posts (it's what Cloud Run's IP gets pre-rendered for free). GraphQL fallback catches the SPA-shell cases. Result:
+
+- ~95%+ of requests never touch GraphQL
+- GraphQL rate-limit stays dormant
+- Carousel support (via instaloader) still works
+
+### 4. Circuit breaker: the re-probing trap
+
+When IG rate-limits us on GraphQL, we store a cooldown timestamp in Firestore (`cache.mark_ig_rate_limited`). For 30 min after, any GraphQL fallback short-circuits **without calling IG**. This matters because:
+
+- User retries during cooldown → short-circuit → zero IG impact ✅
+- Without the breaker: every user retry would probe IG → each probe extends IG's flag → infinite loop
+
+HTML path still runs normally during a GraphQL cooldown — so most posts still work.
+
+### 5. Don't batch-test against real IG
+
+The 2026-04-23 incident was self-inflicted: a 26-URL verification test of instaloader consumed most of IG's per-IP GraphQL budget in minutes. Rule now: **test ONE real URL per change**, use fixture `IGMedia` data for anything more. See the `DEV WARNING` comment block at the top of [backend/pipeline.py](backend/pipeline.py).
+
+### 6. No `Retry-After`, no structured rate-limit signal
+
+IG's anonymous responses don't include `Retry-After` headers, `X-RateLimit-*` headers, or structured retry hints in the body — just a "fail" status and the vague message. You cannot build smart backoff that respects IG's actual timer because IG doesn't publish one. Best you can do is pick an empirically-good cooldown (30 min default, extensible).

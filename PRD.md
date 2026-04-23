@@ -119,33 +119,46 @@ POST /check { url }
   │     HIT + within TTL + valid verdict → return cached, skip pipeline
   │     MISS / expired / prior failure → continue
   │
-  ├─ 1. Fetch metadata via instaloader (anonymous)
-  │     Uses instaloader.Post.from_shortcode(). No cookies, no login.
-  │     Replaces earlier hand-rolled HTML+JSON scraping which broke when IG
-  │     moved media data out of the initial page HTML into client-side XHR
-  │     (SPA hydration). Instaloader tracks IG's API changes so we don't.
-  │     Rate-limit posture: max_connection_attempts=2 (1 retry). On sustained
-  │     403/429 from IG we surface `rate_limited` to the user rather than
-  │     hammering — PRD §5.6.
+  ├─ 1. Fetch metadata — hybrid strategy (anonymous, no cookies)
   │
-  ├─ 2. Extract metadata from the Post object
-  │     - post.caption
-  │     - post.owner_username, post.owner_profile.full_name
-  │     - post.typename: GraphImage | GraphVideo | GraphSidecar
-  │     - post.url          (image posts)
-  │     - post.video_url    (reels)
-  │     - post.get_sidecar_nodes() + node.display_url (carousels)
-  │     - post.video_duration
+  │     Path A (primary): HTML endpoint — GET /p/<shortcode>/
+  │       - httpx fetch, parses embedded <script type="application/json">
+  │         blocks; _deep_find_media walks nested JSON for the media item
+  │       - Returns media metadata when IG serves the pre-rendered HTML
+  │         variant (which it does for ~most crawler/datacenter IP requests)
+  │       - GENTLE on IG's rate-limits: HTML endpoint rarely throttles
   │
-  ├─ 3. Branch on typename
-  │     ┌─ GraphImage: download image → base64 (content-type sniffed)
+  │     Path B (fallback only): instaloader → IG's GraphQL endpoint
+  │       - Triggered by _HtmlParseMiss when Path A returns a SPA shell
+  │         with no embedded media JSON (new-scheme posts that hydrate
+  │         client-side)
+  │       - instaloader.Post.from_shortcode(); max_connection_attempts=2
+  │       - TIGHT rate-limit from datacenter IPs — guarded by circuit
+  │         breaker in cache.py (see §5.6)
+  │       - Handles carousels and any post-type the HTML path missed
+  │
+  │     Why hybrid (2026-04-23 incident): pure instaloader tripped IG's
+  │     GraphQL-specific rate-limit and locked the service out for ~half
+  │     a day. A legacy revision (HTML-only) running on the SAME Cloud Run
+  │     IP during the cooldown succeeded end-to-end — proving the block
+  │     was GraphQL-specific, not IP-wide. HTML-primary routes ~95%+ of
+  │     calls away from GraphQL, which keeps IG's per-endpoint flag dormant.
+  │
+  ├─ 2. Extract metadata (IGMedia dataclass, same shape regardless of path)
+  │     - caption, username, full_name
+  │     - media_type: image | video | carousel
+  │     - media_urls: list (1 item for image/video; up to 5 for carousel)
+  │     - duration_seconds (videos only)
+  │
+  ├─ 3. Branch on media_type
+  │     ┌─ image: download the single URL → base64 (MIME sniffed)
   │     │
-  │     ├─ GraphSidecar (carousel):
-  │     │    3a. Take first MAX_CAROUSEL_ITEMS nodes (= 5)
-  │     │    3b. Download each node.display_url → base64 (multi-image vision)
-  │     │        (video nodes inside the carousel use their thumbnail in v1)
+  │     ├─ carousel:
+  │     │    3a. Take first MAX_CAROUSEL_ITEMS URLs (= 5)
+  │     │    3b. Download each → base64 (multi-image vision to Claude)
+  │     │        Videos inside a carousel use their thumbnail in v1
   │     │
-  │     └─ GraphVideo (reel):
+  │     └─ video (reel):
   │           3a. Download MP4 (cap at MAX_VIDEO_BYTES ~15 MB)
   │           3b. ffmpeg: 5 frames @ 1 fps, first 5 sec, scaled 720w → JPEGs
   │           3c. ffmpeg: extract audio → mp3 (64kbps, capped 60 sec)
@@ -223,14 +236,22 @@ Internal mapping: `verdict` key → CSS tone class → display word
 > - `confidence` reflects source quality × claim specificity. Don't hedge past 95 unless you genuinely can't verify. Use `null` only for `unverifiable`.
 
 ### 5.6 TOS posture
-- Metadata fetched via `instaloader` (Python library) in anonymous mode — **no cookies, no login, no session.** Same surface area as the old hand-rolled parser, just with a maintained library that tracks IG's anti-scraping changes.
-- Instaloader calls IG's public GraphQL endpoint at `https://www.instagram.com/graphql/query` — the same endpoint IG's own JavaScript calls for anonymous viewers.
-- No authentication bypass, no session cookies, no third-party scraping services.
+- Fully anonymous — **no cookies, no login, no session.** No third-party scraping services. Both paths below hit the same endpoints IG serves to non-logged-in visitors.
+- **Path A (HTML):** plain `httpx` GET to `https://www.instagram.com/p/<shortcode>/` with a Safari User-Agent. Parses the embedded `<script type="application/json">` blocks. This is what a normal browser does on first page load. IG's rate-limit on this endpoint from datacenter IPs is **lenient** — this is the primary path.
+- **Path B (GraphQL via instaloader):** fallback only, when HTML doesn't contain media metadata. `instaloader` calls `https://www.instagram.com/graphql/query` — the same endpoint IG's own JS hits to hydrate SPA views. IG's rate-limit on this endpoint from datacenter IPs is **tight**.
 - Still technically "automated access" per Meta TOS; acceptable at personal scale.
-- **Rate-limit posture:** `max_connection_attempts=2` (one retry max). On sustained 403/429 we surface `rate_limited` to the user rather than hammering IG — this is a deliberate "respect the rate limit, don't get flagged" choice, not a usability optimization.
-- **Circuit breaker:** once IG rate-limits us, `cache.mark_ig_rate_limited()` stores a cooldown timestamp in Firestore. For the next `RATE_LIMIT_COOLDOWN_SECONDS` (30 min), every `/check` short-circuits at `fetch_ig_metadata` with `IGRateLimitError` WITHOUT calling IG. This matters because every call *during* a cooldown extends IG's flag on our IP; doing nothing shortens it. Frustrated user re-taps during cooldown are free (no IG impact).
-- **Do not batch-test this path against real IG.** See the comment block above `fetch_ig_metadata` in `pipeline.py` for the incident history. Use fixture IGMedia data for pipeline testing instead.
+- **Rate-limit posture — Path A:** no retry budget needed (HTML endpoint rarely throttles). If IG ever returns 403/429 on HTML, we treat it as a miss and fall through to Path B.
+- **Rate-limit posture — Path B:** `instaloader.max_connection_attempts=2` (one retry max). On sustained 403/401/429 we trip the circuit breaker and surface `rate_limited` to the user rather than hammering IG.
+- **Circuit breaker:** on a GraphQL rate-limit, `cache.mark_ig_rate_limited()` stores a cooldown timestamp in Firestore. For the next `RATE_LIMIT_COOLDOWN_SECONDS` (30 min), the GraphQL fallback short-circuits WITHOUT calling IG — Path A still runs normally so most requests still succeed during the cooldown. The breaker exists because every GraphQL call *during* a cooldown extends IG's flag on our IP; doing nothing shortens it. Frustrated user re-taps during cooldown are free (no GraphQL impact).
+- **Do not batch-test the GraphQL path against real IG.** See the comment block above `fetch_ig_metadata` in `pipeline.py` for the incident history. Use fixture IGMedia data for pipeline testing instead.
 - Self-rate-limit to ≤100/day.
+
+#### What we learned about IG's rate-limiting (2026-04-23 incident)
+- IG throttles the **GraphQL endpoint** much more aggressively than the **HTML endpoint** from datacenter IPs. A burst of ~30 GraphQL calls tripped a ~half-day-long cooldown.
+- When a cooldown is active, IG's response is literally `401 "Please wait a few minutes before you try again."` — with **no `Retry-After` header** and no structured hint for how long to wait. Empirically the "few minutes" was several hours.
+- **Re-probing extends the flag.** During an active IG cooldown, any additional GraphQL calls restart or lengthen IG's timer. The circuit breaker is what keeps us silent.
+- **The HTML endpoint was unaffected** throughout the incident. A legacy HTML-only revision of the service running on the same Cloud Run IP returned valid verdicts end-to-end while GraphQL requests were still 401'd. This is the direct evidence behind the hybrid strategy.
+- Cloud Run IPs are shared with other tenants — reputation is partly outside our control. HTML-first reduces our exposure to GraphQL-flag amplification.
 
 ### 5.7 Error handling
 Error screen copy (all cases): **"Sorry, unable to process! :("** with a sub-line explaining the likely reason.
@@ -270,7 +291,7 @@ Firestore free tier: 1 GB storage, 50K reads/day, 20K writes/day. At 50 checks/d
 | Host | Google Cloud Run | Always-free 2M req/mo, Docker-native, no cold-start pain |
 | Cache | Google Firestore | Free tier, persists across Cloud Run scale-to-zero |
 | Secrets | GCP Secret Manager | Encrypted at rest, mounted as env vars into Cloud Run |
-| IG fetch | `instaloader` (anonymous) | Maintained library tracking IG's anti-scraping changes; works for images, reels, and carousels uniformly |
+| IG fetch | Hybrid: `httpx` HTML scrape primary, `instaloader` GraphQL fallback (both anonymous) | HTML endpoint is rate-limit-lenient from datacenter IPs; GraphQL is tight. HTML-primary keeps us under the flag while `instaloader` catches the SPA-shell cases HTML can't parse |
 | LLM | Claude Sonnet 4.6 | Vision + web_search in one call |
 | ASR | Groq whisper-large-v3-turbo | 10× faster + 5× cheaper than OpenAI Whisper |
 | Media | ffmpeg (apt-installed in the Docker image) | Frame + audio extraction |

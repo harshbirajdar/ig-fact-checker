@@ -73,6 +73,9 @@ BROWSER_UA = (
 )
 
 SHORTCODE_RE = re.compile(r"instagram\.com/(?:[^/]+/)?(?:p|reel|tv)/([A-Za-z0-9_-]+)")
+SCRIPT_JSON_RE = re.compile(
+    r'<script type="application/json"[^>]*>(.*?)</script>', re.DOTALL
+)
 
 # Cap carousel items to bound Claude vision cost + request latency.
 MAX_CAROUSEL_ITEMS = 5
@@ -94,24 +97,31 @@ class IGMedia:
     media_urls: list[str]
 
 
-# ── IG fetch via instaloader ────────────────────────────────────────────────
+# ── IG fetch (hybrid: HTML first, instaloader fallback) ─────────────────────
 #
 # ┌─ DEV WARNING — READ BEFORE EDITING fetch_ig_metadata ──────────────────┐
 # │ DO NOT batch-test this function against real IG URLs.                  │
 # │                                                                        │
-# │ Every call hits Instagram's GraphQL endpoint. Anonymous calls from     │
-# │ datacenter IPs (Cloud Run, GitHub Codespaces, etc.) share a per-IP     │
-# │ rate limit that IG throttles aggressively. Running more than ~5 real   │
-# │ queries in quick succession — OR mixing laptop + Cloud Run testing     │
-# │ in the same hour — will trip IG's cooldown and lock production out     │
-# │ of IG for 15-60 minutes.                                               │
+# │ We talk to Instagram via TWO endpoints, with very different rate-limit │
+# │ behavior from datacenter IPs (Cloud Run):                              │
 # │                                                                        │
-# │ This happened on 2026-04-23: a 26-URL instaloader verification run +   │
-# │ a Cloud Run smoke test + real user traffic all in the same afternoon   │
-# │ tripped the flag. See cache.mark_ig_rate_limited circuit breaker.      │
+# │   HTML endpoint  (/p/<shortcode>/)       — gentle, rarely throttles    │
+# │   GraphQL        (/graphql/query, inst.) — TIGHT, throttles aggressively│
 # │                                                                        │
-# │ For changes needing broader coverage, use cached IGMedia fixtures      │
-# │ (dataclass snapshots), NOT real URLs. Test one real URL max per push.  │
+# │ We deliberately hit HTML first to stay under GraphQL's radar. A        │
+# │ batch-test that forces the GraphQL fallback path (e.g. repeatedly      │
+# │ fetching SPA-shell posts) is the fastest way to trip IG's cooldown —   │
+# │ and once tripped, it takes hours (sometimes a full day) to clear.      │
+# │                                                                        │
+# │ INCIDENT 2026-04-23: 26-URL instaloader verification + Cloud Run       │
+# │ smoke test + user traffic all in one afternoon locked our IP out of    │
+# │ IG's GraphQL for ~half a day. The fix was to move HTML to primary and  │
+# │ make GraphQL a last-resort fallback (this file). Do not regress.       │
+# │                                                                        │
+# │ For changes needing broader coverage: use fixture IGMedia snapshots    │
+# │ (dataclass values), NOT real URLs. Test ONE real URL per push, max.    │
+# │                                                                        │
+# │ See PRD §5.3 (hybrid strategy) and §5.6 (rate-limit posture + breaker).│
 # └────────────────────────────────────────────────────────────────────────┘
 def extract_shortcode(url: str) -> str:
     m = SHORTCODE_RE.search(url)
@@ -143,13 +153,172 @@ def _loader() -> "object":
     )
 
 
-def fetch_ig_metadata(url: str) -> IGMedia:
-    """Resolve an IG URL to structured metadata using instaloader (anonymous).
+class _HtmlParseMiss(Exception):
+    """Internal signal: HTML endpoint returned OK but no media metadata was found.
 
-    Protected by the circuit breaker in cache.py: if IG recently rate-limited
-    us, we skip the IG call entirely and raise IGRateLimitError so the cooldown
-    drains rather than extends.
+    Raised by _fetch_via_html when IG served the SPA-shell variant of the page
+    (media data loaded client-side via XHR, not embedded). We catch this in
+    fetch_ig_metadata and fall back to instaloader's GraphQL call.
+
+    Not exposed to callers; never escapes this module.
     """
+
+
+def fetch_ig_metadata(url: str) -> IGMedia:
+    """Resolve an IG URL to structured metadata.
+
+    HYBRID STRATEGY (2026-04-23):
+      1. Try the HTML endpoint first — /p/<shortcode>/. This is what IG serves
+         to crawlers/datacenter IPs and it's the lenient rate-limit path. Most
+         requests are handled here without ever touching GraphQL.
+      2. Only if HTML has no embedded media metadata (new-scheme SPA shell),
+         fall back to instaloader's GraphQL lookup. GraphQL is the tight
+         rate-limit path; the circuit breaker guards against hammering when
+         IG is angry.
+
+    Why this split exists: on 2026-04-23 pure instaloader usage tripped IG's
+    GraphQL-endpoint rate-limit and locked the service out for hours. Testing
+    on Cloud Run showed the HTML endpoint was still happily serving data to
+    our IP at the same time. Using HTML primarily reduces GraphQL traffic by
+    ~95%+, which keeps IG's per-endpoint flag dormant.
+    """
+    shortcode = extract_shortcode(url)
+
+    # Path A: HTML endpoint (gentle). Handles ~most posts from datacenter IPs.
+    try:
+        return _fetch_via_html(shortcode)
+    except _HtmlParseMiss as miss:
+        log.info("HTML parse miss for %s (%s); falling back to instaloader", shortcode, miss)
+
+    # Path B: instaloader / GraphQL (fallback only — tight rate-limit).
+    return _fetch_via_instaloader(shortcode)
+
+
+# ── Path A: HTML endpoint ────────────────────────────────────────────────────
+def _fetch_via_html(shortcode: str) -> IGMedia:
+    """Fetch and parse /p/<shortcode>/ HTML. Raises _HtmlParseMiss when the page
+    is served in SPA-shell form (no embedded media JSON) so fetch_ig_metadata
+    can fall back. Raises IGFetchError for genuine errors (private/deleted/404)."""
+    canonical = f"https://www.instagram.com/p/{shortcode}/"
+    try:
+        with httpx.Client(timeout=15, follow_redirects=True) as client:
+            resp = client.get(canonical, headers={
+                "User-Agent": BROWSER_UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
+                "Accept-Language": "en-US,en;q=0.5",
+            })
+    except httpx.RequestError as e:
+        # Transient network error — treat as miss so we try instaloader path.
+        raise _HtmlParseMiss(f"network: {e}") from e
+
+    if resp.status_code in (403, 429):
+        # HTML path is rate-limited (rare — it's the gentle endpoint). Let the
+        # instaloader fallback try; if it's also blocked the breaker trips.
+        raise _HtmlParseMiss(f"HTTP {resp.status_code}")
+
+    if resp.status_code == 404:
+        raise IGFetchError(f"Post not found (HTTP 404): {shortcode}")
+
+    if resp.status_code != 200:
+        raise _HtmlParseMiss(f"HTTP {resp.status_code}")
+
+    html = resp.text
+    if shortcode not in html:
+        # Neither SPA shell nor pre-rendered; post is private/deleted/blocked.
+        raise IGFetchError("Post is private, deleted, or inaccessible")
+
+    media = None
+    for script_body in SCRIPT_JSON_RE.findall(html):
+        if shortcode not in script_body:
+            continue
+        try:
+            data = json.loads(script_body)
+        except json.JSONDecodeError:
+            continue
+        media = _deep_find_media(data, shortcode)
+        if media:
+            break
+
+    if not media:
+        # HTML was served but contains no media metadata — new-scheme SPA.
+        # Signal fallback to instaloader.
+        raise _HtmlParseMiss("no media metadata in HTML (SPA shell)")
+
+    return _html_media_to_igmedia(shortcode, media)
+
+
+def _deep_find_media(obj: Any, shortcode: str) -> dict[str, Any] | None:
+    """Walk nested JSON looking for the media item whose `code` matches."""
+    if isinstance(obj, dict):
+        if obj.get("code") == shortcode and "media_type" in obj:
+            return obj
+        for v in obj.values():
+            found = _deep_find_media(v, shortcode)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _deep_find_media(item, shortcode)
+            if found:
+                return found
+    return None
+
+
+def _html_media_to_igmedia(shortcode: str, media: dict[str, Any]) -> IGMedia:
+    """Convert IG's embedded JSON media object to our IGMedia dataclass."""
+    caption_obj = media.get("caption") or {}
+    user_obj = media.get("user") or {}
+    caption = (caption_obj.get("text") or "").strip()
+    username = user_obj.get("username") or ""
+    full_name = user_obj.get("full_name") or ""
+    mt = media.get("media_type")
+
+    if mt == 1:  # image
+        versions = media.get("image_versions2", {}).get("candidates", [])
+        if not versions:
+            raise MediaExtractionError("HTML: image has no versions")
+        return IGMedia(
+            shortcode=shortcode, media_type="image",
+            caption=caption, username=username, full_name=full_name,
+            duration_seconds=None, media_urls=[versions[0]["url"]],
+        )
+
+    if mt == 2:  # video (reel)
+        versions = media.get("video_versions") or []
+        if not versions:
+            raise MediaExtractionError("HTML: video has no versions")
+        duration = int(media["video_duration"]) if media.get("video_duration") else None
+        return IGMedia(
+            shortcode=shortcode, media_type="video",
+            caption=caption, username=username, full_name=full_name,
+            duration_seconds=duration, media_urls=[versions[0]["url"]],
+        )
+
+    if mt == 8:  # carousel
+        items = media.get("carousel_media") or []
+        if not items:
+            raise MediaExtractionError("HTML: empty carousel")
+        urls: list[str] = []
+        for item in items[:MAX_CAROUSEL_ITEMS]:
+            versions = item.get("image_versions2", {}).get("candidates", [])
+            if versions:
+                urls.append(versions[0]["url"])
+        if not urls:
+            raise MediaExtractionError("HTML: carousel has no image versions")
+        return IGMedia(
+            shortcode=shortcode, media_type="carousel",
+            caption=caption, username=username, full_name=full_name,
+            duration_seconds=None, media_urls=urls,
+        )
+
+    raise MediaExtractionError(f"HTML: unsupported media_type: {mt}")
+
+
+# ── Path B: instaloader (GraphQL) fallback ───────────────────────────────────
+def _fetch_via_instaloader(shortcode: str) -> IGMedia:
+    """Fallback fetcher using instaloader (GraphQL endpoint). Guarded by the
+    circuit breaker: if we're in cooldown, we skip the call entirely and raise
+    IGRateLimitError so the cooldown drains rather than extends (PRD §5.6)."""
     import cache  # local import: avoid circular with main.py at import time
     import instaloader
     from instaloader.exceptions import (
@@ -160,13 +329,9 @@ def fetch_ig_metadata(url: str) -> IGMedia:
         QueryReturnedNotFoundException,
     )
 
-    shortcode = extract_shortcode(url)
-
-    # Circuit breaker: if we're in cooldown, don't even try IG. Every call
-    # during the cooldown extends IG's flag on our IP; doing nothing shortens it.
     remaining = cache.ig_cooldown_remaining()
     if remaining > 0:
-        log.info("IG circuit breaker OPEN; %ds remaining, skipping fetch for %s",
+        log.info("IG circuit breaker OPEN; %ds remaining, skipping instaloader fetch for %s",
                  remaining, shortcode)
         raise IGRateLimitError(f"In IG cooldown for {remaining}s more")
 
@@ -177,24 +342,17 @@ def fetch_ig_metadata(url: str) -> IGMedia:
     except QueryReturnedNotFoundException as e:
         raise IGFetchError(f"Post not found or deleted: {shortcode}") from e
     except LoginRequiredException as e:
-        # Private account, age-gated content, or IG requires auth for this post.
         raise IGFetchError(f"Post requires login (private/restricted): {shortcode}") from e
     except (QueryReturnedBadRequestException, BadResponseException) as e:
-        # IG returned 4xx we can't recover from without auth — most commonly
-        # because IG rate-limited us on this datacenter IP. Surface as
-        # "try again" rather than a generic error, per PRD §5.7.
         msg = str(e).lower()
-        if "403" in msg or "rate" in msg or "bad response" in msg:
+        if any(s in msg for s in ("401", "403", "rate", "bad response")):
             cache.mark_ig_rate_limited()
             raise IGRateLimitError(f"IG rate-limited or refused: {e}") from e
         raise IGFetchError(f"IG returned bad response: {e}") from e
     except ConnectionException as e:
-        # Network error after retry cap exhausted. Treat as rate-limit
-        # (conservative) so the user retries rather than assuming it's broken.
         cache.mark_ig_rate_limited()
         raise IGRateLimitError(f"IG connection exhausted: {e}") from e
 
-    # ── Map post to IGMedia ────────────────────────────────────────────────
     caption = (post.caption or "").strip()
     username = post.owner_username or ""
     try:
@@ -210,7 +368,6 @@ def fetch_ig_metadata(url: str) -> IGMedia:
             caption=caption, username=username, full_name=full_name,
             duration_seconds=None, media_urls=[post.url],
         )
-
     if typename == "GraphVideo":
         if not post.video_url:
             raise MediaExtractionError("No video URL on GraphVideo post")
@@ -220,7 +377,6 @@ def fetch_ig_metadata(url: str) -> IGMedia:
             caption=caption, username=username, full_name=full_name,
             duration_seconds=dur, media_urls=[post.video_url],
         )
-
     if typename == "GraphSidecar":
         try:
             nodes = list(post.get_sidecar_nodes())
@@ -228,11 +384,7 @@ def fetch_ig_metadata(url: str) -> IGMedia:
             raise MediaExtractionError(f"Could not read carousel nodes: {e}") from e
         if not nodes:
             raise MediaExtractionError("Empty carousel")
-        # Cap to MAX_CAROUSEL_ITEMS; for video items use the thumbnail
-        # (display_url) since we don't run ffmpeg per carousel item in v1.
-        urls: list[str] = []
-        for node in nodes[:MAX_CAROUSEL_ITEMS]:
-            urls.append(node.display_url)  # display_url works for both image + video nodes
+        urls = [node.display_url for node in nodes[:MAX_CAROUSEL_ITEMS]]
         return IGMedia(
             shortcode=shortcode, media_type="carousel",
             caption=caption, username=username, full_name=full_name,
