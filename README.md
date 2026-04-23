@@ -82,7 +82,7 @@ backend/
 design_handoff_fact_check/   # Original design canvas (3 directions, all states)
 PRD.md                       # Spec — source of truth
 README.md                    # This file
-demo.html / designs.html / prototype.html  # Misc prototypes from early iteration
+designs.html / prototype.html              # Misc prototypes from early iteration
 ```
 
 ## Env vars required
