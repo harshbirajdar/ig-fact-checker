@@ -41,6 +41,12 @@ class IGFetchError(PipelineError):
     error_reason = "private_or_deleted"
 
 
+class IGRateLimitError(PipelineError):
+    """IG is rate-limiting us. User should retry in a few minutes.
+    We deliberately do NOT retry aggressively to avoid escalation."""
+    error_reason = "rate_limited"
+
+
 class MediaExtractionError(PipelineError):
     """Found metadata but couldn't download/process the media."""
     error_reason = "backend_error"
@@ -67,23 +73,28 @@ BROWSER_UA = (
 )
 
 SHORTCODE_RE = re.compile(r"instagram\.com/(?:[^/]+/)?(?:p|reel|tv)/([A-Za-z0-9_-]+)")
-SCRIPT_JSON_RE = re.compile(
-    r'<script type="application/json"[^>]*>(.*?)</script>', re.DOTALL
-)
+
+# Cap carousel items to bound Claude vision cost + request latency.
+MAX_CAROUSEL_ITEMS = 5
+
+MediaKind = Literal["image", "video", "carousel"]
 
 
 @dataclass
 class IGMedia:
     shortcode: str
-    media_type: Literal["image", "video"]
+    media_type: MediaKind
     caption: str
     username: str
     full_name: str
     duration_seconds: int | None
-    media_url: str  # video MP4 or image URL
+    # "image"/"video" → single URL in media_urls[0].
+    # "carousel" → up to MAX_CAROUSEL_ITEMS image URLs (videos inside a carousel
+    # use their thumbnail, so all entries here are images).
+    media_urls: list[str]
 
 
-# ── IG fetch + metadata parse ───────────────────────────────────────────────
+# ── IG fetch via instaloader ────────────────────────────────────────────────
 def extract_shortcode(url: str) -> str:
     m = SHORTCODE_RE.search(url)
     if not m:
@@ -91,90 +102,109 @@ def extract_shortcode(url: str) -> str:
     return m.group(1)
 
 
-def _deep_find_media(obj: Any, shortcode: str) -> dict[str, Any] | None:
-    """Walk nested JSON looking for the media item whose `code` matches."""
-    if isinstance(obj, dict):
-        if obj.get("code") == shortcode and "media_type" in obj:
-            return obj
-        for v in obj.values():
-            found = _deep_find_media(v, shortcode)
-            if found:
-                return found
-    elif isinstance(obj, list):
-        for item in obj:
-            found = _deep_find_media(item, shortcode)
-            if found:
-                return found
-    return None
+def _loader() -> "object":
+    """Build a fresh Instaloader context per request.
+
+    We cap connection attempts to keep total wall time under Cloud Run's async
+    worker budget AND to avoid looking like a hammering bot to IG. If IG throws
+    a sustained 403/429, we surface a `rate_limited` error to the user rather
+    than aggressive retries (PRD §5.6 — TOS posture: polite anonymous only).
+    """
+    import instaloader
+    return instaloader.Instaloader(
+        download_pictures=False,
+        download_videos=False,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+        compress_json=False,
+        quiet=True,
+        max_connection_attempts=2,  # 1 retry max; fail fast on rate-limit
+        request_timeout=15.0,
+    )
 
 
 def fetch_ig_metadata(url: str) -> IGMedia:
-    """Fetch the IG page anonymously and extract structured metadata."""
+    """Resolve an IG URL to structured metadata using instaloader (anonymous)."""
+    import instaloader
+    from instaloader.exceptions import (
+        BadResponseException,
+        ConnectionException,
+        LoginRequiredException,
+        QueryReturnedBadRequestException,
+        QueryReturnedNotFoundException,
+    )
+
     shortcode = extract_shortcode(url)
-    canonical = f"https://www.instagram.com/p/{shortcode}/"
+    L = _loader()
 
     try:
-        with httpx.Client(timeout=15, follow_redirects=True) as client:
-            resp = client.get(canonical, headers={
-                "User-Agent": BROWSER_UA,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-                "Accept-Language": "en-US,en;q=0.5",
-            })
-    except httpx.RequestError as e:
-        raise IGFetchError(f"Network error fetching IG: {e}") from e
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+    except QueryReturnedNotFoundException as e:
+        raise IGFetchError(f"Post not found or deleted: {shortcode}") from e
+    except LoginRequiredException as e:
+        # Private account, age-gated content, or IG requires auth for this post.
+        raise IGFetchError(f"Post requires login (private/restricted): {shortcode}") from e
+    except (QueryReturnedBadRequestException, BadResponseException) as e:
+        # IG returned 4xx we can't recover from without auth — most commonly
+        # because IG rate-limited us on this datacenter IP. Surface as
+        # "try again" rather than a generic error, per PRD §5.7.
+        msg = str(e).lower()
+        if "403" in msg or "rate" in msg or "bad response" in msg:
+            raise IGRateLimitError(f"IG rate-limited or refused: {e}") from e
+        raise IGFetchError(f"IG returned bad response: {e}") from e
+    except ConnectionException as e:
+        # Network error after retry cap exhausted. Treat as rate-limit
+        # (conservative) so the user retries rather than assuming it's broken.
+        raise IGRateLimitError(f"IG connection exhausted: {e}") from e
 
-    if resp.status_code != 200:
-        raise IGFetchError(f"IG returned HTTP {resp.status_code}")
+    # ── Map post to IGMedia ────────────────────────────────────────────────
+    caption = (post.caption or "").strip()
+    username = post.owner_username or ""
+    try:
+        full_name = post.owner_profile.full_name or ""
+    except Exception:
+        full_name = ""
 
-    html = resp.text
-    if shortcode not in html:
-        # Private accounts / deleted posts typically don't include the shortcode in JSON
-        raise IGFetchError("Post is private, deleted, or inaccessible")
+    typename = post.typename  # GraphImage / GraphVideo / GraphSidecar
 
-    media = None
-    for script_body in SCRIPT_JSON_RE.findall(html):
-        if shortcode not in script_body:
-            continue
+    if typename == "GraphImage":
+        return IGMedia(
+            shortcode=shortcode, media_type="image",
+            caption=caption, username=username, full_name=full_name,
+            duration_seconds=None, media_urls=[post.url],
+        )
+
+    if typename == "GraphVideo":
+        if not post.video_url:
+            raise MediaExtractionError("No video URL on GraphVideo post")
+        dur = int(post.video_duration) if post.video_duration else None
+        return IGMedia(
+            shortcode=shortcode, media_type="video",
+            caption=caption, username=username, full_name=full_name,
+            duration_seconds=dur, media_urls=[post.video_url],
+        )
+
+    if typename == "GraphSidecar":
         try:
-            data = json.loads(script_body)
-        except json.JSONDecodeError:
-            continue
-        media = _deep_find_media(data, shortcode)
-        if media:
-            break
+            nodes = list(post.get_sidecar_nodes())
+        except Exception as e:
+            raise MediaExtractionError(f"Could not read carousel nodes: {e}") from e
+        if not nodes:
+            raise MediaExtractionError("Empty carousel")
+        # Cap to MAX_CAROUSEL_ITEMS; for video items use the thumbnail
+        # (display_url) since we don't run ffmpeg per carousel item in v1.
+        urls: list[str] = []
+        for node in nodes[:MAX_CAROUSEL_ITEMS]:
+            urls.append(node.display_url)  # display_url works for both image + video nodes
+        return IGMedia(
+            shortcode=shortcode, media_type="carousel",
+            caption=caption, username=username, full_name=full_name,
+            duration_seconds=None, media_urls=urls,
+        )
 
-    if not media:
-        raise IGFetchError("Could not locate media metadata in IG page")
-
-    media_type_code = media.get("media_type")
-    if media_type_code == 1:
-        media_type: Literal["image", "video"] = "image"
-        versions = media.get("image_versions2", {}).get("candidates", [])
-        if not versions:
-            raise MediaExtractionError("No image versions found")
-        media_url = versions[0]["url"]
-    elif media_type_code == 2:
-        media_type = "video"
-        versions = media.get("video_versions") or []
-        if not versions:
-            raise MediaExtractionError("No video versions found")
-        media_url = versions[0]["url"]
-    else:
-        # media_type 8 = carousel; not supported in v1
-        raise MediaExtractionError(f"Unsupported media_type: {media_type_code}")
-
-    caption_obj = media.get("caption") or {}
-    user_obj = media.get("user") or {}
-
-    return IGMedia(
-        shortcode=shortcode,
-        media_type=media_type,
-        caption=(caption_obj.get("text") or "").strip(),
-        username=user_obj.get("username") or "",
-        full_name=user_obj.get("full_name") or "",
-        duration_seconds=int(media["video_duration"]) if media.get("video_duration") else None,
-        media_url=media_url,
-    )
+    raise MediaExtractionError(f"Unsupported post typename: {typename}")
 
 
 # ── Media download + ffmpeg ─────────────────────────────────────────────────
@@ -323,11 +353,27 @@ WEB_SEARCH_TOOL = {
 }
 
 
+def _sniff_image_mime(raw: bytes) -> str:
+    """Detect image MIME from magic bytes. Claude accepts jpeg/png/webp/gif."""
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    # Unknown — default to jpeg and let Claude tell us if it's wrong.
+    return "image/jpeg"
+
+
 def _image_block(path: Path) -> dict[str, Any]:
-    data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+    raw = path.read_bytes()
+    mime = _sniff_image_mime(raw[:16])
+    data = base64.standard_b64encode(raw).decode("utf-8")
     return {
         "type": "image",
-        "source": {"type": "base64", "media_type": "image/jpeg", "data": data},
+        "source": {"type": "base64", "media_type": mime, "data": data},
     }
 
 
@@ -468,15 +514,25 @@ def run_pipeline(url: str, on_stage: StageCallback | None = None) -> dict[str, A
         if media.media_type == "video":
             stage(1)
             video_path = tmp / "video.mp4"
-            _download(media.media_url, video_path, MAX_VIDEO_BYTES)
+            _download(media.media_urls[0], video_path, MAX_VIDEO_BYTES)
             frame_paths, audio_path = extract_frames_and_audio(video_path, tmp)
             if audio_path:
                 stage(2)
                 transcript = transcribe(audio_path)
             claude_start = 3  # Searching the web
-        else:
-            img_path = tmp / "image.jpg"
-            _download(media.media_url, img_path, MAX_VIDEO_BYTES)
+        elif media.media_type == "carousel":
+            # Download each carousel item as-is; Claude accepts jpeg/png/webp.
+            # _sniff_image_mime picks the right content-type when building
+            # the image block, so no pre-conversion needed.
+            frame_paths = []
+            for i, img_url in enumerate(media.media_urls):
+                p = tmp / f"carousel_{i}.img"
+                _download(img_url, p, MAX_VIDEO_BYTES)
+                frame_paths.append(p)
+            claude_start = 1  # Posts/carousels: 0=fetch, 1=search, 2=cross-ref, 3=writing
+        else:  # image
+            img_path = tmp / "image.img"
+            _download(media.media_urls[0], img_path, MAX_VIDEO_BYTES)
             frame_paths = [img_path]
             claude_start = 1  # Posts: 0=fetch, 1=search, 2=cross-ref, 3=writing
 
@@ -498,6 +554,8 @@ def run_pipeline(url: str, on_stage: StageCallback | None = None) -> dict[str, A
     if media.media_type == "video":
         duration = f" · {media.duration_seconds} sec" if media.duration_seconds else ""
         verdict["kind"] = f"Reel{duration}"
+    elif media.media_type == "carousel":
+        verdict["kind"] = f"Post · Carousel · {len(media.media_urls)} images"
     else:
         verdict["kind"] = "Post · Image"
     verdict["transcript_excerpt"] = transcript

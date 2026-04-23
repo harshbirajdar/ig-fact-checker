@@ -44,6 +44,7 @@ VERDICT_TONES: dict[str, str] = {
 
 ERROR_COPY: dict[str, str] = {
     "private_or_deleted": "The post might be from a private account, deleted, or temporarily unreachable.",
+    "rate_limited": "Instagram is rate-limiting us. Please try again in a few minutes.",
     "timeout": "Took too long. Try again in a moment.",
     "backend_error": "Something went wrong on our end.",
 }

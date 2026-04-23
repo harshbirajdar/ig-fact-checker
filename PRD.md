@@ -20,11 +20,11 @@ Misinformation spreads fast on Instagram reels and posts. Doomscrolling users en
 **In scope (v1)**
 - Public Instagram reels (single video)
 - Public Instagram photo posts (single image)
+- Public Instagram carousel posts (multi-image, up to first 5 items — videos in a carousel use their thumbnail)
 - One content item at a time
 
 **Out of scope (v1)**
 - Stories, highlights, IGTV
-- Carousel posts (multi-image)
 - Private accounts
 - DM-shared content
 - Saving history, sharing verdicts, multi-user
@@ -119,50 +119,58 @@ POST /check { url }
   │     HIT + within TTL + valid verdict → return cached, skip pipeline
   │     MISS / expired / prior failure → continue
   │
-  ├─ 1. Fetch IG page HTML
-  │     GET instagram.com/p/<shortcode>/ with User-Agent: Mozilla/5.0 ... Safari/17.0
-  │     (anonymous browser pathway — same one non-IG users use)
+  ├─ 1. Fetch metadata via instaloader (anonymous)
+  │     Uses instaloader.Post.from_shortcode(). No cookies, no login.
+  │     Replaces earlier hand-rolled HTML+JSON scraping which broke when IG
+  │     moved media data out of the initial page HTML into client-side XHR
+  │     (SPA hydration). Instaloader tracks IG's API changes so we don't.
+  │     Rate-limit posture: max_connection_attempts=2 (1 retry). On sustained
+  │     403/429 from IG we surface `rate_limited` to the user rather than
+  │     hammering — PRD §5.6.
   │
-  ├─ 2. Parse embedded JSON
-  │     Regex-extract <script type="application/json"> blocks
-  │     Deep-search for object with "code" == shortcode
-  │     Target path: .data.xdt_api__v1__media__shortcode__web_info.items[0]
+  ├─ 2. Extract metadata from the Post object
+  │     - post.caption
+  │     - post.owner_username, post.owner_profile.full_name
+  │     - post.typename: GraphImage | GraphVideo | GraphSidecar
+  │     - post.url          (image posts)
+  │     - post.video_url    (reels)
+  │     - post.get_sidecar_nodes() + node.display_url (carousels)
+  │     - post.video_duration
   │
-  ├─ 3. Extract metadata
-  │     - caption.text
-  │     - user.username, user.full_name
-  │     - media_type: 1 = image, 2 = video (reel)
-  │     - image_versions2[0].url  (for posts)
-  │     - video_versions[0].url   (for reels)
-  │     - like_count, comment_count, taken_at, dimensions
-  │
-  ├─ 4. Branch on media_type
-  │     ┌─ POST (image): download image → base64
+  ├─ 3. Branch on typename
+  │     ┌─ GraphImage: download image → base64 (content-type sniffed)
   │     │
-  │     └─ REEL (video):
-  │           4a. Download MP4 (cap at MAX_VIDEO_BYTES ~15 MB)
-  │           4b. ffmpeg: 5 frames @ 1 fps, first 5 sec, scaled 720w → JPEGs
-  │           4c. ffmpeg: extract audio → mp3 (64kbps, capped 60 sec)
-  │           4d. Groq whisper-large-v3-turbo → transcript (non-fatal if fails)
+  │     ├─ GraphSidecar (carousel):
+  │     │    3a. Take first MAX_CAROUSEL_ITEMS nodes (= 5)
+  │     │    3b. Download each node.display_url → base64 (multi-image vision)
+  │     │        (video nodes inside the carousel use their thumbnail in v1)
+  │     │
+  │     └─ GraphVideo (reel):
+  │           3a. Download MP4 (cap at MAX_VIDEO_BYTES ~15 MB)
+  │           3b. ffmpeg: 5 frames @ 1 fps, first 5 sec, scaled 720w → JPEGs
+  │           3c. ffmpeg: extract audio → mp3 (64kbps, capped 60 sec)
+  │           3d. Groq whisper-large-v3-turbo → transcript (non-fatal if fails)
   │
-  ├─ 5. Claude call
+  ├─ 4. Claude call
   │     Model: claude-sonnet-4-6
   │     Tools: web_search (server-side)
   │     Input (multi-part):
-  │       - text: "Instagram Reel from @handle ... CAPTION: ... AUDIO TRANSCRIPT: ..."
-  │       - image: 5 frames (reels) or 1 image (post), base64
+  │       - text: "Instagram {Reel|Photo post} from @handle ... CAPTION: ... AUDIO TRANSCRIPT: ..."
+  │       - image: 5 frames (reels) OR 1 image (image post) OR up to 5 images (carousel), base64
   │       - text: "Return the JSON verdict now."
+  │     Image content-type (jpeg/png/webp/gif) is sniffed from magic bytes before
+  │     base64-encoding — IG can serve any of those and Claude rejects mismatches.
   │     System prompt enforces JSON-only output matching §5.4 schema.
   │
-  ├─ 6. Cache write (Firestore)
+  ├─ 5. Cache write (Firestore)
   │     Store { verdict: <json>, cached_at: <unix_ts> } under shortcode
   │     Failures only propagate to logs; never block the response.
   │
-  ├─ 7. Render HTML
+  ├─ 6. Render HTML
   │     Jinja2 template with verdict card markup
   │     Inlines CSS (no external fetches — Quick Look sandbox restrictions)
   │
-  └─ 8. Return HTML (Content-Type: text/html)
+  └─ 7. Return HTML (Content-Type: text/html)
 ```
 
 ### 5.4 Verdict JSON schema (Claude's structured output)
@@ -215,16 +223,18 @@ Internal mapping: `verdict` key → CSS tone class → display word
 > - `confidence` reflects source quality × claim specificity. Don't hedge past 95 unless you genuinely can't verify. Use `null` only for `unverifiable`.
 
 ### 5.6 TOS posture
-- The backend hits `instagram.com/<url>` exactly once per check, with a browser UA, no cookies.
-- This replicates the anonymous-viewer pathway IG serves to non-logged-in browsers.
+- Metadata fetched via `instaloader` (Python library) in anonymous mode — **no cookies, no login, no session.** Same surface area as the old hand-rolled parser, just with a maintained library that tracks IG's anti-scraping changes.
+- Instaloader calls IG's public GraphQL endpoint at `https://www.instagram.com/graphql/query` — the same endpoint IG's own JavaScript calls for anonymous viewers.
 - No authentication bypass, no session cookies, no third-party scraping services.
 - Still technically "automated access" per Meta TOS; acceptable at personal scale.
-- Mitigation: rate limit self to ≤100/day; back off on 429/403.
+- **Rate-limit posture:** `max_connection_attempts=2` (one retry max). On sustained 403/429 we surface `rate_limited` to the user rather than hammering IG — this is a deliberate "respect the rate limit, don't get flagged" choice, not a usability optimization.
+- Self-rate-limit to ≤100/day.
 
 ### 5.7 Error handling
 Error screen copy (all cases): **"Sorry, unable to process! :("** with a sub-line explaining the likely reason.
 
-- **IG returns login wall / empty JSON** → error screen: "The post might be from a private account, deleted, or temporarily unreachable."
+- **IG returns login wall / post deleted / private account** (`IGFetchError`) → error screen: "The post might be from a private account, deleted, or temporarily unreachable."
+- **IG rate-limits us** (`IGRateLimitError`, sustained 403/429 from the GraphQL endpoint after retries exhausted) → error screen: "Instagram is rate-limiting us. Please try again in a few minutes." Retrying is the user's choice, not ours; we do not escalate.
 - **Video too long (>60s) or too large (>15MB)** → truncate to first 60 sec before processing (no error shown)
 - **Claude returns no claim to check** (aesthetic reel, music video) → `CAN'T VERIFY` verdict card with `tldr: "No factual claim detected."` — not the error screen
 - **Backend timeout (>30s)** → error screen: "Took too long. Try again in a moment."
@@ -258,9 +268,11 @@ Firestore free tier: 1 GB storage, 50K reads/day, 20K writes/day. At 50 checks/d
 | Host | Google Cloud Run | Always-free 2M req/mo, Docker-native, no cold-start pain |
 | Cache | Google Firestore | Free tier, persists across Cloud Run scale-to-zero |
 | Secrets | GCP Secret Manager | Encrypted at rest, mounted as env vars into Cloud Run |
+| IG fetch | `instaloader` (anonymous) | Maintained library tracking IG's anti-scraping changes; works for images, reels, and carousels uniformly |
 | LLM | Claude Sonnet 4.6 | Vision + web_search in one call |
 | ASR | Groq whisper-large-v3-turbo | 10× faster + 5× cheaper than OpenAI Whisper |
 | Media | ffmpeg (apt-installed in the Docker image) | Frame + audio extraction |
+| CI/CD | Cloud Build trigger on `git push main` | Auto-build Docker image → auto-deploy to Cloud Run (no manual `gcloud` after every change) |
 
 **Estimated cost per fact-check (cache miss):** ~$0.008 (Claude vision + search) + ~$0.0001 (Whisper, reels only) = <1¢ per check.
 **Cache hit cost:** effectively $0 (Firestore free tier).

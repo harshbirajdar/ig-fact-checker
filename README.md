@@ -12,10 +12,13 @@ Instagram reel/post
   ▼  POST url to backend /check
   │
 Backend (Cloud Run · Python/FastAPI):
-  1. Fetch the IG page anonymously, parse embedded JSON for metadata
-  2. Download media (video MP4 or image)
-  3. Reels only: ffmpeg → 5 frames + 60-sec audio clip → Groq Whisper transcript
-  4. Claude (Sonnet) with web_search: returns JSON verdict
+  1. Resolve metadata via `instaloader` (anonymous, no cookies) — handles images, reels, and carousels uniformly
+  2. Download media:
+     - Image post → the single image URL
+     - Reel → the MP4 + ffmpeg → 5 frames @ 1 fps + 60-sec audio clip
+     - Carousel → up to first 5 item images (videos inside carousels use their thumbnail)
+  3. Reels only: Groq Whisper → audio transcript (non-fatal if it fails)
+  4. Claude Sonnet (vision + web_search tool): returns the JSON verdict
   5. Firestore cache write (keyed on shortcode, 7-day TTL)
   6. Render Jinja2 template → HTML
   │
@@ -38,6 +41,14 @@ Full details: see [PRD.md](PRD.md).
 
 The prompt explicitly forbids using `MOSTLY *` as a hedge (see PRD §5.5).
 
+## Supported content
+
+- Image posts
+- Reels (videos)
+- Carousels (multi-image, first 5 items processed)
+
+Out of scope: Stories, IGTV, private accounts, DM-shared content. See PRD §3.
+
 ## Stack
 
 | Layer | Choice |
@@ -46,8 +57,10 @@ The prompt explicitly forbids using `MOSTLY *` as a hedge (see PRD §5.5).
 | UI | HTML rendered by backend; opened in Instagram's in-app browser or Quick Look |
 | Backend | Python + FastAPI |
 | Host | Google Cloud Run (service name: `fact-check`, region: `us-central1`) |
+| CI/CD | Cloud Build trigger `fact-check-deploy-main` (push to `main` → build → deploy) |
 | Cache | Firestore (`fact_check_cache` collection) |
 | Jobs | Firestore (`fact_check_jobs` collection, for async processing polling) |
+| IG fetch | `instaloader` Python library — anonymous, no cookies |
 | LLM | Claude Sonnet 4.6 with `web_search` tool |
 | ASR | Groq `whisper-large-v3-turbo` (non-fatal if it fails) |
 | Media | ffmpeg (bundled into Docker image) |
