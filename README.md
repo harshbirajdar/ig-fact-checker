@@ -177,7 +177,15 @@ Takes ~3 min. Output prints a `Service URL:` like `https://fact-check-xxxxxx-uc.
 
 ### 7. Build the iOS Shortcut
 
-See [SHORTCUT.md](SHORTCUT.md) for the exact actions and a template iCloud link.
+On your iPhone, open the Shortcuts app and create a new shortcut with three actions, in order:
+
+1. **Get URLs from Input** — Share Sheet input, accept types: **URLs** only
+2. **Get Contents of URL** — Method: GET, URL: `https://fact-check-xxxxxx-uc.a.run.app/check?url=` (your Cloud Run URL from step 6) followed by the URL-encoded input from step 1
+3. **Quick Look** the response
+
+Name it **Fact Check**, enable **Show in Share Sheet** in the shortcut's details, restrict accepted types to **URLs**. That's it.
+
+See [PRD.md §5.2](PRD.md) for the canonical action list.
 
 ### 8. Test it
 

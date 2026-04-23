@@ -43,7 +43,6 @@ Hit any of the `/preview/*` endpoints to iterate on the UI without burning Claud
 ## Things I'd welcome help with
 
 - Custom-domain setup guide (Cloud Run domain mapping walkthrough)
-- iCloud-shared Shortcut template (so [SHORTCUT.md](SHORTCUT.md)'s "easy path" actually works)
 - More worked examples in the Claude prompt to reduce hedging (PRD §5.5)
 - A proper fixture test harness that exercises the full pipeline without touching IG or Claude
 
