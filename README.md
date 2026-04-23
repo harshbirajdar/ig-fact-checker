@@ -1,6 +1,10 @@
 # Fact Check for Instagram
 
-One-gesture fact-checker for Instagram reels and posts. Triggered from iOS's native share sheet; renders a verdict card in ~10 seconds. Personal-scale, single user (me).
+One-gesture fact-checker for Instagram reels and posts. Triggered from iOS's native share sheet; renders a verdict card in ~10 seconds.
+
+Originally built as a personal tool. Open-sourced so anyone can self-host their own instance — fork the repo, bring your own API keys, deploy to your own Google Cloud project, install the iOS Shortcut, and you're live. Docs below walk through each step.
+
+**Status:** working daily driver for the author. See [PRD.md](PRD.md) for the full spec and [CONTRIBUTING.md](CONTRIBUTING.md) if you'd like to send a PR.
 
 ## How it works
 
@@ -89,26 +93,62 @@ README.md                    # This file
 designs.html / prototype.html              # Misc prototypes from early iteration
 ```
 
-## Env vars required
+## Self-hosting
 
-Create `backend/.env` (never committed) with:
+Setting up your own instance takes about an hour end-to-end. These steps assume basic comfort with a terminal; see "Difficulty" at the bottom for an honest assessment.
 
-```
-ANTHROPIC_API_KEY=sk-ant-...
-GROQ_API_KEY=gsk_...
-GOOGLE_CLOUD_PROJECT=<your-gcp-project-id>   # enables Firestore cache
-```
+### 0. Prerequisites
 
-## Running locally
+You'll need accounts on:
+
+- **[Anthropic](https://console.anthropic.com/)** — for Claude API access. Pay-as-you-go; budget ~$0.008 per fact-check.
+- **[Groq](https://console.groq.com/)** — for Whisper audio transcription. Free tier is sufficient for personal use.
+- **[Google Cloud](https://console.cloud.google.com/)** — for hosting. Cloud Run + Firestore both have generous free tiers; at personal-scale usage the monthly bill should be ~$0.
+- **An iPhone** — this is iOS Shortcuts only. No Android path.
+- A laptop with [Python 3.12+](https://www.python.org/downloads/), [ffmpeg](https://ffmpeg.org/), and the [gcloud CLI](https://cloud.google.com/sdk/docs/install).
+
+### 1. Clone the repo and install
 
 ```bash
-cd backend
+git clone https://github.com/harshbirajdar/ig-fact-checker.git
+cd ig-fact-checker/backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+### 2. Get your API keys
+
+- **Anthropic:** console.anthropic.com → API Keys → Create Key → copy the `sk-ant-...` string
+- **Groq:** console.groq.com → API Keys → Create API Key → copy the `gsk_...` string
+
+### 3. Configure environment
+
+```bash
+cp .env.example .env
+# Edit .env and fill in:
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   GROQ_API_KEY=gsk_...
+#   GOOGLE_CLOUD_PROJECT=<your-gcp-project-id>  (set in step 4)
+```
+
+### 4. Create a GCP project + enable APIs
+
+```bash
+gcloud auth login
+gcloud projects create fact-check-<yourname> --set-as-default
+gcloud services enable run.googleapis.com firestore.googleapis.com cloudbuild.googleapis.com
+gcloud firestore databases create --location=us-central1
+```
+
+Put the project ID in `.env` as `GOOGLE_CLOUD_PROJECT`.
+
+### 5. Try it locally (optional but sanity-preserving)
+
+```bash
 uvicorn main:app --reload --port 8765
 ```
 
-Design-iteration endpoints (no IG hit, no Claude call, pure fixtures):
+Design-preview endpoints (zero IG / Claude cost, pure fixtures):
 
 ```
 http://127.0.0.1:8765/preview/processing_reel
@@ -120,17 +160,53 @@ http://127.0.0.1:8765/preview/unverifiable
 http://127.0.0.1:8765/preview/error_private
 ```
 
-## Shipping a change
+### 6. Deploy to Cloud Run
 
 ```bash
-cd backend
+# Still in backend/
 gcloud run deploy fact-check \
   --source . \
   --region us-central1 \
-  --allow-unauthenticated
+  --allow-unauthenticated \
+  --set-env-vars "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY,GROQ_API_KEY=$GROQ_API_KEY,GOOGLE_CLOUD_PROJECT=$GOOGLE_CLOUD_PROJECT"
 ```
 
-Takes ~2–3 min. Env vars already set on Cloud Run; `--source .` doesn't touch them.
+Takes ~3 min. Output prints a `Service URL:` like `https://fact-check-xxxxxx-uc.a.run.app` — copy it; you'll need it for the Shortcut.
+
+(Optional: set up Cloud Build trigger from GitHub for auto-deploy on push — see `cloudbuild.yaml` in the repo.)
+
+### 7. Build the iOS Shortcut
+
+See [SHORTCUT.md](SHORTCUT.md) for the exact actions and a template iCloud link.
+
+### 8. Test it
+
+Open Instagram → pick any public reel or post → paper-plane icon → Share to… → tap your Shortcut. You should see the processing card, then a verdict in 10–15 seconds.
+
+## Difficulty
+
+Honest assessment:
+
+| Your background | Realistic? |
+|---|---|
+| Python developer | Easy. ~1 hour. |
+| Technical but not a coder (e.g. designer who dabbles in scripts) | Doable. ~2–3 hours, will hit friction on GCP setup and iOS Shortcut. |
+| Non-technical | Not really. Consider asking a developer friend to host an instance you can share. |
+
+## Shipping a change (for self-hosters)
+
+```bash
+git push    # if CI/CD is wired to your GCP project
+```
+
+Or manually:
+
+```bash
+cd backend
+gcloud run deploy fact-check --source . --region us-central1 --allow-unauthenticated
+```
+
+Takes ~2–3 min. Env vars set in step 6 persist.
 
 ## Workflow
 
