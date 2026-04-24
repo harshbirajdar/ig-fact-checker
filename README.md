@@ -1,5 +1,7 @@
 # Fact Check for Instagram
 
+Built out of frustration. I kept hitting Instagram reels making specific health and factual claims — does this food actually have more protein, does cardio actually work this way — and having no easy way to verify them. Checking meant leaving the app, opening a diff app, doing the work myself. Enough friction that I never did it. I asked Instagram to build this natively. They didn’t. So I did.
+
 One-gesture fact-checker for Instagram reels and posts. Triggered from iOS's native share sheet; renders a verdict card in ~10 seconds.
 
 Originally built as a personal tool. Open-sourced so anyone can self-host their own instance — fork the repo, bring your own API keys, deploy to your own Google Cloud project, install the iOS Shortcut, and you're live. Docs below walk through each step.
